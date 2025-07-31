@@ -62,6 +62,7 @@ int trigger_interrupt(uint32_t device_id, uint32_t interrupt_id);
 
 /* Socket communication */
 int send_message_to_model(const protocol_message_t *message, protocol_message_t *response);
+int handle_model_interrupts(void);
 
 #ifdef __cplusplus
 }

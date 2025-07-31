@@ -88,7 +88,7 @@ TEST(interrupt_handling) {
     /* Simple interrupt handler */
     void test_interrupt_handler(uint32_t device_id, uint32_t interrupt_id) {
         interrupt_received = 1;
-        printf("  Interrupt received: device=%d, irq=%d\n", device_id, interrupt_id);
+        printf("  Interrupt received from MODEL: device=%d, irq=%d\n", device_id, interrupt_id);
     }
     
     if (interface_layer_init() != 0) {
@@ -101,7 +101,10 @@ TEST(interrupt_handling) {
         return -1;
     }
     
-    /* Trigger interrupt */
+    /* This simulates what would happen when the Python model triggers an interrupt.
+     * In a real scenario, this would be called by handle_model_interrupts() 
+     * when it receives an interrupt message from the Python model. */
+    printf("  Simulating interrupt from model to driver...\n");
     if (trigger_interrupt(1, 0x10) != 0) {
         interface_layer_deinit();
         return -1;
@@ -138,6 +141,27 @@ TEST(protocol_message) {
     return 0;
 }
 
+TEST(model_interrupt_handling) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Test the model interrupt handling function */
+    printf("  Testing model interrupt handling capability...\n");
+    
+    /* This tests the infrastructure for receiving interrupts from models */
+    if (handle_model_interrupts() == 0) {
+        printf("  Model interrupt handling function available\n");
+    } else {
+        printf("  Model interrupt handling function failed\n");
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    interface_layer_deinit();
+    return 0;
+}
+
 int main(void) {
     printf("NewICD3 Interface Layer Unit Tests\n");
     printf("==================================\n\n");
@@ -146,6 +170,7 @@ int main(void) {
     RUN_TEST(device_registration);
     RUN_TEST(register_access);
     RUN_TEST(interrupt_handling);
+    RUN_TEST(model_interrupt_handling);
     RUN_TEST(protocol_message);
     
     printf("\nTest Results:\n");
