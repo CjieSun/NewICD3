@@ -1,0 +1,35 @@
+# Build artifacts
+build/
+bin/
+
+# Object files
+*.o
+*.a
+*.so
+*.so.*
+
+# Executables
+icd3_simulator
+test_interface_layer
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Socket files
+/tmp/icd3_interface
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
