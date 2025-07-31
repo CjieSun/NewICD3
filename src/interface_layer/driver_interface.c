@@ -25,6 +25,7 @@ static interrupt_handler_t interrupt_handlers[MAX_DEVICES];
 
 /* Signal handler for memory access violations */
 static void segv_handler(int sig, siginfo_t *info, void *context) {
+    (void)sig; /* Mark parameter as used */
     uintptr_t fault_addr = (uintptr_t)info->si_addr;
     ucontext_t *uctx = (ucontext_t *)context;
     
@@ -32,27 +33,82 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     uintptr_t rip = (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP];
     uint8_t *instruction = (uint8_t *)rip;
     
-    /* Determine if it's a read or write instruction */
+    /* Determine if it's a read or write instruction and access size */
     int is_write = 0;
     uint32_t access_size = 4; /* Default to 4 bytes */
+    uint64_t write_data = 0;
     
-    /* Parse x86 instruction to determine read/write */
-    if (*instruction == 0x8B) {
-        /* mov reg, [mem] → read instruction */
-        is_write = 0;
-        printf("Detected READ instruction (0x8B) at RIP 0x%lx\n", rip);
-    } else if (*instruction == 0x89) {
-        /* mov [mem], reg → write instruction */
-        is_write = 1;
-        printf("Detected WRITE instruction (0x89) at RIP 0x%lx\n", rip);
-    } else if (*instruction == 0xC7) {
-        /* mov [mem], imm32 → write instruction (immediate) */
-        is_write = 1;
-        printf("Detected WRITE instruction with immediate (0xC7) at RIP 0x%lx\n", rip);
-    } else {
-        /* Unknown instruction or unsupported - treat as read for safety */
-        is_write = 0;
-        printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as READ\n", *instruction, rip);
+    /* Enhanced x86-64 instruction parsing */
+    uint8_t *inst_ptr = instruction;
+    
+    /* Skip REX prefix if present (0x40-0x4F) */
+    if (*inst_ptr >= 0x40 && *inst_ptr <= 0x4F) {
+        inst_ptr++;
+    }
+    
+    /* Parse instruction opcode and determine size/operation */
+    switch (*inst_ptr) {
+        case 0x8A: /* mov r8, [mem] - 8-bit read */
+            is_write = 0;
+            access_size = 1;
+            printf("Detected 8-bit READ instruction (0x8A) at RIP 0x%lx\n", rip);
+            break;
+        case 0x8B: /* mov r32, [mem] - 32-bit read */
+            is_write = 0;
+            access_size = 4;
+            printf("Detected 32-bit READ instruction (0x8B) at RIP 0x%lx\n", rip);
+            break;
+        case 0x88: /* mov [mem], r8 - 8-bit write */
+            is_write = 1;
+            access_size = 1;
+            printf("Detected 8-bit WRITE instruction (0x88) at RIP 0x%lx\n", rip);
+            /* Extract 8-bit data from low byte of register */
+            write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Simplified: assume AL register */
+            break;
+        case 0x89: /* mov [mem], r32 - 32-bit write */
+            is_write = 1;
+            access_size = 4;
+            printf("Detected 32-bit WRITE instruction (0x89) at RIP 0x%lx\n", rip);
+            /* Extract 32-bit data from register */
+            write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF; /* Simplified: assume EAX register */
+            break;
+        case 0x66: /* 16-bit operand size prefix */
+            inst_ptr++;
+            if (*inst_ptr == 0x8B) { /* mov r16, [mem] - 16-bit read */
+                is_write = 0;
+                access_size = 2;
+                printf("Detected 16-bit READ instruction (0x66 0x8B) at RIP 0x%lx\n", rip);
+            } else if (*inst_ptr == 0x89) { /* mov [mem], r16 - 16-bit write */
+                is_write = 1;
+                access_size = 2;
+                printf("Detected 16-bit WRITE instruction (0x66 0x89) at RIP 0x%lx\n", rip);
+                write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFF; /* Simplified: assume AX register */
+            } else if (*inst_ptr == 0xC7) { /* mov [mem], imm16 - 16-bit immediate write */
+                is_write = 1;
+                access_size = 2;
+                printf("Detected 16-bit immediate WRITE instruction (0x66 0xC7) at RIP 0x%lx\n", rip);
+                /* Extract immediate value (simplified - would need full ModR/M parsing) */
+                write_data = 0x1234; /* Placeholder */
+            }
+            break;
+        case 0xC6: /* mov [mem], imm8 - 8-bit immediate write */
+            is_write = 1;
+            access_size = 1;
+            printf("Detected 8-bit immediate WRITE instruction (0xC6) at RIP 0x%lx\n", rip);
+            write_data = 0x12; /* Placeholder */
+            break;
+        case 0xC7: /* mov [mem], imm32 - 32-bit immediate write */
+            is_write = 1;
+            access_size = 4;
+            printf("Detected 32-bit immediate WRITE instruction (0xC7) at RIP 0x%lx\n", rip);
+            write_data = 0x12345678; /* Placeholder */
+            break;
+        default:
+            /* Unknown instruction - treat as 32-bit read for safety */
+            is_write = 0;
+            access_size = 4;
+            printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", *inst_ptr, rip);
+            break;
     }
     
     /* Find which device this address belongs to */
@@ -62,8 +118,8 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             uint32_t offset = fault_addr - base;
             uint32_t device_addr = devices[i].base_address + offset;
             
-            printf("Memory access violation at device %d, address 0x%x (%s)\n", 
-                   devices[i].device_id, device_addr, is_write ? "WRITE" : "READ");
+            printf("Memory access violation at device %d, address 0x%x (%s, %d bytes)\n", 
+                   devices[i].device_id, device_addr, is_write ? "WRITE" : "READ", access_size);
             
             /* Handle the actual read/write operation by sending it to the device model */
             protocol_message_t message = {0};
@@ -73,21 +129,27 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             message.length = access_size;
             
             if (is_write) {
-                /* For writes, we need to extract the data from registers 
-                 * This is simplified - in a real implementation we'd need to 
-                 * fully decode the instruction to get the source operand */
-                uint32_t write_data = 0; /* Placeholder - would extract from instruction/registers */
+                /* Copy write data to message based on access size */
                 memcpy(message.data, &write_data, access_size);
+                printf("Writing %d-byte value: 0x%lx\n", access_size, write_data);
             }
             
             protocol_message_t response = {0};
             if (send_message_to_model(&message, &response) == 0) {
                 if (!is_write && response.result == RESULT_SUCCESS) {
-                    /* For reads, we would need to store the result back to the destination register
-                     * This is simplified - in a real implementation we'd need to fully decode 
-                     * the instruction and update the appropriate register */
-                    printf("Read completed, data: 0x%x\n", *(uint32_t*)response.data);
+                    /* For reads, simulate storing result back to memory location */
+                    uint64_t read_data = 0;
+                    memcpy(&read_data, response.data, access_size);
+                    printf("Read completed, %d-byte data: 0x%lx\n", access_size, read_data);
+                    
+                    /* In a real implementation, we would update the destination register 
+                     * based on the instruction's ModR/M byte. For now, just complete the operation. */
                 }
+                
+                /* Advance RIP to skip the faulting instruction */
+                /* This is a simplified approach - real implementation would need 
+                 * proper instruction length calculation */
+                uctx->uc_mcontext.gregs[REG_RIP] += (access_size == 2 && instruction[0] == 0x66) ? 3 : 2;
             }
             return;
         }
@@ -275,28 +337,124 @@ int trigger_interrupt(uint32_t device_id, uint32_t interrupt_id) {
 }
 
 int send_message_to_model(const protocol_message_t *message, protocol_message_t *response) {
-    /* For now, simulate the communication */
     printf("Sending to model: device_id=%d, cmd=%d, addr=0x%x, len=%d\n",
            message->device_id, message->command, message->address, message->length);
     
-    /* Simulate response */
+    /* Try to connect to Python model via socket */
+    int model_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (model_socket == -1) {
+        printf("Failed to create socket for model communication\n");
+        return -1;
+    }
+    
+    /* Set socket to non-blocking mode */
+    int flags = fcntl(model_socket, F_GETFL, 0);
+    fcntl(model_socket, F_SETFL, flags | O_NONBLOCK);
+    
+    struct sockaddr_un model_addr;
+    memset(&model_addr, 0, sizeof(model_addr));
+    model_addr.sun_family = AF_UNIX;
+    strncpy(model_addr.sun_path, SOCKET_PATH, sizeof(model_addr.sun_path) - 1);
+    
+    /* Attempt to connect to model with timeout */
+    int connect_result = connect(model_socket, (struct sockaddr*)&model_addr, sizeof(model_addr));
+    if (connect_result == -1 && errno != EINPROGRESS) {
+        /* Model not available, fall back to simulation */
+        printf("Model not available, using simulation\n");
+        close(model_socket);
+        goto simulation_fallback;
+    }
+    
+    /* Wait for connection to complete with timeout */
+    fd_set write_fds;
+    struct timeval timeout;
+    FD_ZERO(&write_fds);
+    FD_SET(model_socket, &write_fds);
+    timeout.tv_sec = 0;  /* 500ms timeout */
+    timeout.tv_usec = 500000;
+    
+    int select_result = select(model_socket + 1, NULL, &write_fds, NULL, &timeout);
+    if (select_result <= 0) {
+        /* Connection timed out or failed, fall back to simulation */
+        printf("Model connection timeout, using simulation\n");
+        close(model_socket);
+        goto simulation_fallback;
+    }
+    
+    /* Check if connection actually succeeded */
+    int error = 0;
+    socklen_t len = sizeof(error);
+    if (getsockopt(model_socket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+        printf("Model connection failed, using simulation\n");
+        close(model_socket);
+        goto simulation_fallback;
+    }
+    
+    /* Set back to blocking mode for data transfer */
+    fcntl(model_socket, F_SETFL, flags);
+    
+    /* Send message to model with timeout */
+    fd_set write_fds2;
+    struct timeval send_timeout;
+    FD_ZERO(&write_fds2);
+    FD_SET(model_socket, &write_fds2);
+    send_timeout.tv_sec = 0;
+    send_timeout.tv_usec = 500000;  /* 500ms timeout */
+    
+    if (select(model_socket + 1, NULL, &write_fds2, NULL, &send_timeout) <= 0) {
+        printf("Model send timeout, using simulation\n");
+        close(model_socket);
+        goto simulation_fallback;
+    }
+    
+    ssize_t bytes_sent = send(model_socket, message, sizeof(protocol_message_t), MSG_DONTWAIT);
+    if (bytes_sent != sizeof(protocol_message_t)) {
+        printf("Failed to send complete message to model, using simulation\n");
+        close(model_socket);
+        goto simulation_fallback;
+    }
+    
+    /* Receive response from model with timeout */
+    if (response) {
+        fd_set read_fds;
+        struct timeval recv_timeout;
+        FD_ZERO(&read_fds);
+        FD_SET(model_socket, &read_fds);
+        recv_timeout.tv_sec = 0;
+        recv_timeout.tv_usec = 500000;  /* 500ms timeout */
+        
+        if (select(model_socket + 1, &read_fds, NULL, NULL, &recv_timeout) <= 0) {
+            printf("Model receive timeout, using simulation\n");
+            close(model_socket);
+            goto simulation_fallback;
+        }
+        
+        ssize_t bytes_received = recv(model_socket, response, sizeof(protocol_message_t), MSG_DONTWAIT);
+        if (bytes_received != sizeof(protocol_message_t)) {
+            printf("Failed to receive complete response from model, using simulation\n");
+            close(model_socket);
+            goto simulation_fallback;
+        }
+        printf("Received response from model: result=%d\n", response->result);
+    }
+    
+    close(model_socket);
+    return 0;
+
+simulation_fallback:
+    /* Fallback simulation logic */
     if (response) {
         memcpy(response, message, sizeof(protocol_message_t));
         response->result = RESULT_SUCCESS;
         
         if (message->command == CMD_READ) {
-            /* Simulate reading some data based on address */
             uint32_t simulated_data = 0xDEADBEEF;
-            
-            /* Simulate STATUS register with READY bit set */
             if ((message->address & 0xFF) == 0x04) {  /* STATUS register offset */
                 simulated_data = 0x00000001;  /* READY bit set */
             }
-            
             memcpy(response->data, &simulated_data, sizeof(simulated_data));
         }
     }
-    
     return 0;
 }
 

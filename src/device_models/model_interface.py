@@ -50,7 +50,7 @@ class ModelInterface:
         self.socket.bind(SOCKET_PATH)
         self.socket.listen(5)
         
-        print(f"Model interface {self.device_id} started on {SOCKET_PATH}")
+        print(f"Device model {self.device_id} started on {SOCKET_PATH}")
         
         while self.running:
             try:
@@ -60,7 +60,6 @@ class ModelInterface:
                 threading.Thread(target=self.handle_client, args=(client,)).start()
             except OSError:
                 break
-                
     def stop(self):
         """Stop the device model server"""
         self.running = False
@@ -117,41 +116,6 @@ class ModelInterface:
         time.sleep(3)
         if self.running:
             self.trigger_interrupt_to_driver(0x02)  # Status change interrupt
-        
-    def start(self):
-        """Start the device model server"""
-        self.running = True
-        
-        # Remove existing socket
-        try:
-            os.unlink(SOCKET_PATH)
-        except OSError:
-            pass
-            
-        # Create and bind socket
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.bind(SOCKET_PATH)
-        self.socket.listen(5)
-        
-        print(f"Device model {self.device_id} started on {SOCKET_PATH}")
-        
-        while self.running:
-            try:
-                client, addr = self.socket.accept()
-                # Handle client in separate thread
-                threading.Thread(target=self.handle_client, args=(client,)).start()
-            except OSError:
-                break
-                
-    def stop(self):
-        """Stop the device model server"""
-        self.running = False
-        if self.socket:
-            self.socket.close()
-        try:
-            os.unlink(SOCKET_PATH)
-        except OSError:
-            pass
             
     def handle_client(self, client_socket):
         """Handle communication with a client"""
