@@ -15,13 +15,13 @@ BUILD_DIR = build
 BIN_DIR = bin
 
 # Source files
-INTERFACE_SRCS = $(SRC_DIR)/interface_layer/interface_layer.c
+INTERFACE_SRCS = $(SRC_DIR)/interface_layer/driver_interface.c
 DRIVER_SRCS = $(SRC_DIR)/driver_layer/device_driver.c
 APP_SRCS = $(SRC_DIR)/app_layer/main.c
 TEST_SRCS = $(TEST_DIR)/test_interface_layer.c
 
 # Object files
-INTERFACE_OBJS = $(BUILD_DIR)/interface_layer.o
+INTERFACE_OBJS = $(BUILD_DIR)/driver_interface.o
 DRIVER_OBJS = $(BUILD_DIR)/device_driver.o
 APP_OBJS = $(BUILD_DIR)/main.o
 TEST_OBJS = $(BUILD_DIR)/test_interface_layer.o
@@ -46,7 +46,7 @@ $(TEST_TARGET): $(INTERFACE_OBJS) $(TEST_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 # Object files
-$(BUILD_DIR)/interface_layer.o: $(INTERFACE_SRCS)
+$(BUILD_DIR)/driver_interface.o: $(INTERFACE_SRCS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/device_driver.o: $(DRIVER_SRCS)

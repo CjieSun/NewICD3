@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Simple Device Model Example for NewICD3 Interface Layer
+Model Interface for NewICD3 Interface Layer
 
-This is a basic example of how a Python device model can communicate
-with the C interface layer via socket protocol.
+This Python interface provides device model functionality and can trigger
+interrupts to the C driver interface via socket protocol.
 """
 
 import socket
@@ -11,6 +11,7 @@ import struct
 import threading
 import time
 import os
+import sys
 
 # Protocol definitions (must match C definitions)
 CMD_READ = 0x01
@@ -26,12 +27,96 @@ RESULT_INVALID_ADDR = 0x03
 
 SOCKET_PATH = "/tmp/icd3_interface"
 
-class SimpleDeviceModel:
+class ModelInterface:
     def __init__(self, device_id=1):
         self.device_id = device_id
         self.registers = {}  # Simple register storage
         self.running = False
         self.socket = None
+        self.client_sockets = []  # Track connected clients for interrupt delivery
+        
+    def start(self):
+        """Start the device model server"""
+        self.running = True
+        
+        # Remove existing socket
+        try:
+            os.unlink(SOCKET_PATH)
+        except OSError:
+            pass
+            
+        # Create and bind socket
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.bind(SOCKET_PATH)
+        self.socket.listen(5)
+        
+        print(f"Model interface {self.device_id} started on {SOCKET_PATH}")
+        
+        while self.running:
+            try:
+                client, addr = self.socket.accept()
+                self.client_sockets.append(client)
+                # Handle client in separate thread
+                threading.Thread(target=self.handle_client, args=(client,)).start()
+            except OSError:
+                break
+                
+    def stop(self):
+        """Stop the device model server"""
+        self.running = False
+        
+        # Close all client connections
+        for client in self.client_sockets:
+            try:
+                client.close()
+            except:
+                pass
+        self.client_sockets.clear()
+        
+        if self.socket:
+            self.socket.close()
+        try:
+            os.unlink(SOCKET_PATH)
+        except OSError:
+            pass
+            
+    def trigger_interrupt_to_driver(self, interrupt_id):
+        """Trigger an interrupt to the driver interface"""
+        print(f"Model triggering interrupt {interrupt_id} to driver for device {self.device_id}")
+        
+        # Create interrupt message
+        message = struct.pack('<IIIII', self.device_id, CMD_INTERRUPT, 0, interrupt_id, RESULT_SUCCESS)
+        message += b'\x00' * 256  # Padding for data field
+        
+        # Send interrupt to all connected clients (driver interfaces)
+        for client in self.client_sockets[:]:  # Use slice to avoid modification during iteration
+            try:
+                client.send(message)
+                print(f"Interrupt {interrupt_id} sent to driver")
+            except Exception as e:
+                print(f"Failed to send interrupt to client: {e}")
+                # Remove failed client
+                if client in self.client_sockets:
+                    self.client_sockets.remove(client)
+                try:
+                    client.close()
+                except:
+                    pass
+                    
+    def simulate_device_activity(self):
+        """Simulate device activity that triggers interrupts"""
+        if not self.running:
+            return
+            
+        # Simulate some device events that would trigger interrupts
+        time.sleep(2)  # Wait a bit after startup
+        
+        if self.running:
+            self.trigger_interrupt_to_driver(0x01)  # Data ready interrupt
+            
+        time.sleep(3)
+        if self.running:
+            self.trigger_interrupt_to_driver(0x02)  # Status change interrupt
         
     def start(self):
         """Start the device model server"""
@@ -71,7 +156,7 @@ class SimpleDeviceModel:
     def handle_client(self, client_socket):
         """Handle communication with a client"""
         try:
-            while True:
+            while self.running:
                 # Receive message (simplified protocol)
                 data = client_socket.recv(1024)
                 if not data:
@@ -89,6 +174,9 @@ class SimpleDeviceModel:
         except Exception as e:
             print(f"Error handling client: {e}")
         finally:
+            # Remove client from tracking list
+            if client_socket in self.client_sockets:
+                self.client_sockets.remove(client_socket)
             client_socket.close()
             
     def process_command(self, device_id, command, address, length, data):
@@ -129,13 +217,17 @@ class SimpleDeviceModel:
 
 def main():
     """Main function for testing"""
-    model = SimpleDeviceModel(1)
+    model = ModelInterface(1)
+    
+    # Start device activity simulation in background
+    activity_thread = threading.Thread(target=model.simulate_device_activity, daemon=True)
     
     try:
-        print("Starting simple device model...")
+        print("Starting model interface...")
+        activity_thread.start()
         model.start()
     except KeyboardInterrupt:
-        print("\nShutting down device model...")
+        print("\nShutting down model interface...")
         model.stop()
 
 if __name__ == "__main__":

@@ -8,9 +8,11 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/select.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <ucontext.h>
 
 #define MAX_DEVICES 16
 #define SOCKET_PATH "/tmp/icd3_interface"
@@ -24,6 +26,34 @@ static interrupt_handler_t interrupt_handlers[MAX_DEVICES];
 /* Signal handler for memory access violations */
 static void segv_handler(int sig, siginfo_t *info, void *context) {
     uintptr_t fault_addr = (uintptr_t)info->si_addr;
+    ucontext_t *uctx = (ucontext_t *)context;
+    
+    /* Get the RIP (instruction pointer) to examine the instruction */
+    uintptr_t rip = (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP];
+    uint8_t *instruction = (uint8_t *)rip;
+    
+    /* Determine if it's a read or write instruction */
+    int is_write = 0;
+    uint32_t access_size = 4; /* Default to 4 bytes */
+    
+    /* Parse x86 instruction to determine read/write */
+    if (*instruction == 0x8B) {
+        /* mov reg, [mem] → read instruction */
+        is_write = 0;
+        printf("Detected READ instruction (0x8B) at RIP 0x%lx\n", rip);
+    } else if (*instruction == 0x89) {
+        /* mov [mem], reg → write instruction */
+        is_write = 1;
+        printf("Detected WRITE instruction (0x89) at RIP 0x%lx\n", rip);
+    } else if (*instruction == 0xC7) {
+        /* mov [mem], imm32 → write instruction (immediate) */
+        is_write = 1;
+        printf("Detected WRITE instruction with immediate (0xC7) at RIP 0x%lx\n", rip);
+    } else {
+        /* Unknown instruction or unsupported - treat as read for safety */
+        is_write = 0;
+        printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as READ\n", *instruction, rip);
+    }
     
     /* Find which device this address belongs to */
     for (int i = 0; i < device_count; i++) {
@@ -32,11 +62,33 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             uint32_t offset = fault_addr - base;
             uint32_t device_addr = devices[i].base_address + offset;
             
-            printf("Memory access violation at device %d, address 0x%x\n", 
-                   devices[i].device_id, device_addr);
+            printf("Memory access violation at device %d, address 0x%x (%s)\n", 
+                   devices[i].device_id, device_addr, is_write ? "WRITE" : "READ");
             
-            /* This is where we would handle the actual read/write operation
-             * by sending it to the device model via socket */
+            /* Handle the actual read/write operation by sending it to the device model */
+            protocol_message_t message = {0};
+            message.device_id = devices[i].device_id;
+            message.command = is_write ? CMD_WRITE : CMD_READ;
+            message.address = device_addr;
+            message.length = access_size;
+            
+            if (is_write) {
+                /* For writes, we need to extract the data from registers 
+                 * This is simplified - in a real implementation we'd need to 
+                 * fully decode the instruction to get the source operand */
+                uint32_t write_data = 0; /* Placeholder - would extract from instruction/registers */
+                memcpy(message.data, &write_data, access_size);
+            }
+            
+            protocol_message_t response = {0};
+            if (send_message_to_model(&message, &response) == 0) {
+                if (!is_write && response.result == RESULT_SUCCESS) {
+                    /* For reads, we would need to store the result back to the destination register
+                     * This is simplified - in a real implementation we'd need to fully decode 
+                     * the instruction and update the appropriate register */
+                    printf("Read completed, data: 0x%x\n", *(uint32_t*)response.data);
+                }
+            }
             return;
         }
     }
@@ -85,7 +137,7 @@ int interface_layer_init(void) {
         return -1;
     }
     
-    printf("Interface layer initialized successfully\n");
+    printf("Driver interface initialized successfully\n");
     return 0;
 }
 
@@ -106,7 +158,7 @@ int interface_layer_deinit(void) {
     }
     
     device_count = 0;
-    printf("Interface layer deinitialized\n");
+    printf("Driver interface deinitialized\n");
     return 0;
 }
 
@@ -242,6 +294,52 @@ int send_message_to_model(const protocol_message_t *message, protocol_message_t 
             }
             
             memcpy(response->data, &simulated_data, sizeof(simulated_data));
+        }
+    }
+    
+    return 0;
+}
+
+/* Function to receive and handle interrupts from Python model */
+int handle_model_interrupts(void) {
+    /* This would typically be called in a separate thread to listen for 
+     * incoming interrupts from the Python model via socket */
+    
+    fd_set readfds;
+    struct timeval timeout;
+    
+    FD_ZERO(&readfds);
+    FD_SET(server_socket, &readfds);
+    
+    /* Non-blocking check for incoming connections */
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 100000;  /* 100ms timeout */
+    
+    int activity = select(server_socket + 1, &readfds, NULL, NULL, &timeout);
+    
+    if (activity > 0 && FD_ISSET(server_socket, &readfds)) {
+        /* Accept incoming connection from model */
+        int client_socket = accept(server_socket, NULL, NULL);
+        if (client_socket >= 0) {
+            printf("Model connected for interrupt delivery\n");
+            
+            /* Read interrupt message */
+            protocol_message_t interrupt_msg;
+            ssize_t bytes_read = recv(client_socket, &interrupt_msg, sizeof(interrupt_msg), 0);
+            
+            if (bytes_read == sizeof(interrupt_msg) && interrupt_msg.command == CMD_INTERRUPT) {
+                printf("Received interrupt from model: device_id=%d, interrupt_id=%d\n",
+                       interrupt_msg.device_id, interrupt_msg.length);
+                
+                /* Trigger the interrupt handler */
+                if (trigger_interrupt(interrupt_msg.device_id, interrupt_msg.length) == 0) {
+                    printf("Interrupt from model processed successfully\n");
+                } else {
+                    printf("Failed to process interrupt from model\n");
+                }
+            }
+            
+            close(client_socket);
         }
     }
     
