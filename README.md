@@ -215,3 +215,51 @@ MIT License - 详见LICENSE文件
 
 项目维护者: CjieSun
 GitHub: https://github.com/CjieSun/NewICD3
+
+---
+
+## Recent Interface Layer Improvements
+
+### Key Changes Implemented
+
+1. **File Naming Updates**
+   - `interface_layer.c` → `driver_interface.c`
+   - `simple_device_model.py` → `model_interface.py`
+
+2. **Enhanced SEGV Handler**
+   - Added x86 instruction parsing for read/write detection
+   - Supports instruction types: 0x8B (read), 0x89 (write), 0xC7 (write immediate)
+   - Uses RIP register to examine instruction bytes at fault address
+
+3. **Corrected Interrupt Flow**
+   - **Before**: Driver-to-driver interrupt triggering (incorrect)
+   - **After**: Python model-to-C driver interrupt triggering (correct direction)
+
+4. **Socket Communication Enhancement**
+   - Bidirectional communication between Python models and C driver
+   - Interrupt delivery from Python to C driver interface
+   - Model interface can trigger interrupts to driver interface
+
+### x86 Instruction Detection in SEGV Handler
+
+The enhanced `segv_handler` now detects instruction types by examining RIP:
+
+| Instruction Byte | Assembly | Type | Description |
+|-----------------|----------|------|-------------|
+| 0x8B | `mov reg, [mem]` | READ | Move from memory to register |
+| 0x89 | `mov [mem], reg` | WRITE | Move from register to memory |
+| 0xC7 | `mov [mem], imm32` | WRITE | Move immediate to memory |
+
+### Integration Demo
+
+Run the integration demo to see Python model triggering interrupts to C driver:
+
+```bash
+# Build the system first
+make clean && make
+
+# Run the demo
+python3 demo_integration.py
+```
+
+This demonstrates the corrected interrupt flow where Python device models trigger interrupts that are received by the C driver interface, which is the proper direction for hardware simulation.
