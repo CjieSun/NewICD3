@@ -162,6 +162,118 @@ TEST(model_interrupt_handling) {
     return 0;
 }
 
+TEST(bare_address_access_8bit) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Register a test device */
+    if (register_device(1, 0x40000000, 0x1000) != 0) {
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    printf("  Testing 8-bit bare address access (triggers segv_handler)...\n");
+    
+    /* Get the mapped memory address for direct access */
+    volatile uint8_t *mapped_addr = (volatile uint8_t *)get_device_mapped_memory(1);
+    
+    if (mapped_addr) {
+        /* This should trigger the segv_handler for 8-bit read */
+        printf("  Performing 8-bit read access at mapped address %p...\n", (void*)mapped_addr);
+        volatile uint8_t val = *mapped_addr;
+        printf("  8-bit read completed, value: 0x%02x\n", val);
+        
+        /* This should trigger the segv_handler for 8-bit write */
+        printf("  Performing 8-bit write access...\n");
+        *mapped_addr = 0x42;
+        printf("  8-bit write completed\n");
+    } else {
+        printf("  Could not get mapped address for direct access\n");
+        unregister_device(1);
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    unregister_device(1);
+    interface_layer_deinit();
+    return 0;
+}
+
+TEST(bare_address_access_16bit) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Register a test device */
+    if (register_device(1, 0x40000000, 0x1000) != 0) {
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    printf("  Testing 16-bit bare address access (triggers segv_handler)...\n");
+    
+    volatile uint16_t *mapped_addr = (volatile uint16_t *)get_device_mapped_memory(1);
+    
+    if (mapped_addr) {
+        /* This should trigger the segv_handler for 16-bit read */
+        printf("  Performing 16-bit read access at mapped address %p...\n", (void*)mapped_addr);
+        volatile uint16_t val = *mapped_addr;
+        printf("  16-bit read completed, value: 0x%04x\n", val);
+        
+        /* This should trigger the segv_handler for 16-bit write */
+        printf("  Performing 16-bit write access...\n");
+        *mapped_addr = 0x1234;
+        printf("  16-bit write completed\n");
+    } else {
+        printf("  Could not get mapped address for direct access\n");
+        unregister_device(1);
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    unregister_device(1);
+    interface_layer_deinit();
+    return 0;
+}
+
+TEST(bare_address_access_32bit) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Register a test device */
+    if (register_device(1, 0x40000000, 0x1000) != 0) {
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    printf("  Testing 32-bit bare address access (triggers segv_handler)...\n");
+    
+    volatile uint32_t *mapped_addr = (volatile uint32_t *)get_device_mapped_memory(1);
+    
+    if (mapped_addr) {
+        /* This should trigger the segv_handler for 32-bit read */
+        printf("  Performing 32-bit read access at mapped address %p...\n", (void*)mapped_addr);
+        volatile uint32_t val = *mapped_addr;
+        printf("  32-bit read completed, value: 0x%08x\n", val);
+        
+        /* This should trigger the segv_handler for 32-bit write */
+        printf("  Performing 32-bit write access...\n");
+        *mapped_addr = 0x12345678;
+        printf("  32-bit write completed\n");
+    } else {
+        printf("  Could not get mapped address for direct access\n");
+        unregister_device(1);
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    unregister_device(1);
+    interface_layer_deinit();
+    return 0;
+}
+
 int main(void) {
     printf("NewICD3 Interface Layer Unit Tests\n");
     printf("==================================\n\n");
@@ -171,6 +283,9 @@ int main(void) {
     RUN_TEST(register_access);
     RUN_TEST(interrupt_handling);
     RUN_TEST(model_interrupt_handling);
+    RUN_TEST(bare_address_access_8bit);
+    RUN_TEST(bare_address_access_16bit);
+    RUN_TEST(bare_address_access_32bit);
     RUN_TEST(protocol_message);
     
     printf("\nTest Results:\n");

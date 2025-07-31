@@ -55,6 +55,9 @@ int unregister_device(uint32_t device_id);
 uint32_t read_register(uint32_t address, uint32_t size);
 int write_register(uint32_t address, uint32_t data, uint32_t size);
 
+/* Testing support - get mapped memory address for a device */
+void* get_device_mapped_memory(uint32_t device_id);
+
 /* Interrupt handling */
 typedef void (*interrupt_handler_t)(uint32_t device_id, uint32_t interrupt_id);
 int register_interrupt_handler(uint32_t device_id, interrupt_handler_t handler);
