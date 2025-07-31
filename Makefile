@@ -1,0 +1,91 @@
+# NewICD3 Universal IC Simulator Makefile
+# ========================================
+
+# Compiler settings
+CC = gcc
+CFLAGS = -Wall -Wextra -std=gnu99 -g -O0 -D_GNU_SOURCE
+INCLUDES = -Iinclude
+LDFLAGS = 
+
+# Directories
+SRC_DIR = src
+INCLUDE_DIR = include
+TEST_DIR = tests
+BUILD_DIR = build
+BIN_DIR = bin
+
+# Source files
+INTERFACE_SRCS = $(SRC_DIR)/interface_layer/interface_layer.c
+DRIVER_SRCS = $(SRC_DIR)/driver_layer/device_driver.c
+APP_SRCS = $(SRC_DIR)/app_layer/main.c
+TEST_SRCS = $(TEST_DIR)/test_interface_layer.c
+
+# Object files
+INTERFACE_OBJS = $(BUILD_DIR)/interface_layer.o
+DRIVER_OBJS = $(BUILD_DIR)/device_driver.o
+APP_OBJS = $(BUILD_DIR)/main.o
+TEST_OBJS = $(BUILD_DIR)/test_interface_layer.o
+
+# Targets
+MAIN_TARGET = $(BIN_DIR)/icd3_simulator
+TEST_TARGET = $(BIN_DIR)/test_interface_layer
+
+.PHONY: all clean test directories
+
+all: directories $(MAIN_TARGET) $(TEST_TARGET)
+
+directories:
+	@mkdir -p $(BUILD_DIR) $(BIN_DIR)
+
+# Main application
+$(MAIN_TARGET): $(INTERFACE_OBJS) $(DRIVER_OBJS) $(APP_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+# Test executable
+$(TEST_TARGET): $(INTERFACE_OBJS) $(TEST_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+# Object files
+$(BUILD_DIR)/interface_layer.o: $(INTERFACE_SRCS)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/device_driver.o: $(DRIVER_SRCS)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/main.o: $(APP_SRCS)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/test_interface_layer.o: $(TEST_SRCS)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# Test targets
+test: $(TEST_TARGET)
+	@echo "Running interface layer tests..."
+	@$(TEST_TARGET)
+
+integration-test: $(MAIN_TARGET)
+	@echo "Running integration tests..."
+	@$(MAIN_TARGET)
+
+# Clean
+clean:
+	rm -rf $(BUILD_DIR) $(BIN_DIR)
+
+# Help
+help:
+	@echo "NewICD3 Universal IC Simulator Build System"
+	@echo "==========================================="
+	@echo ""
+	@echo "Available targets:"
+	@echo "  all              - Build all targets"
+	@echo "  test             - Run unit tests"
+	@echo "  integration-test - Run integration tests"
+	@echo "  clean            - Clean build artifacts"
+	@echo "  help             - Show this help message"
+	@echo ""
+	@echo "Architecture:"
+	@echo "  Application Layer    - src/app_layer/"
+	@echo "  Driver Layer         - src/driver_layer/"
+	@echo "  Interface Layer      - src/interface_layer/"
+	@echo "  Device Models        - src/device_models/ (future)"
+	@echo "  Tests                - tests/"
