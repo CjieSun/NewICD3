@@ -195,6 +195,123 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     }
     printf("\n");
     
+    /* Check for REP STOS instructions first (memset-style bulk operations) */
+    uint8_t *rep_inst_ptr = instruction;
+    int is_rep_stos = 0;
+    int stos_size = 1; /* Default to byte size */
+    
+    /* Check for REP prefix (0xF3) */
+    if (*rep_inst_ptr == 0xF3) {
+        rep_inst_ptr++;
+        
+        /* Check for 16-bit operand size prefix before STOS */
+        if (*rep_inst_ptr == 0x66) {
+            stos_size = 2; /* 16-bit word */
+            rep_inst_ptr++;
+        }
+        
+        /* Check for STOS opcodes */
+        if (*rep_inst_ptr == 0xAA) {
+            /* REP STOSB - repeat store byte */
+            is_rep_stos = 1;
+            stos_size = 1;
+            printf("Detected REP STOSB instruction (bulk byte write)\n");
+        } else if (*rep_inst_ptr == 0xAB) {
+            /* REP STOSD or REP STOSW - repeat store dword/word */
+            is_rep_stos = 1;
+            if (stos_size != 2) {
+                stos_size = 4; /* Default to 32-bit dword if no 0x66 prefix */
+            }
+            printf("Detected REP STOS%c instruction (bulk %d-byte write)\n", 
+                   stos_size == 2 ? 'W' : 'D', stos_size);
+        }
+    }
+    
+    /* Handle REP STOS instructions */
+    if (is_rep_stos) {
+        /* Extract registers for REP STOS operation */
+        uint64_t count = uctx->uc_mcontext.gregs[REG_RCX];     /* Count of operations */
+        uint64_t dest_addr = uctx->uc_mcontext.gregs[REG_RDI]; /* Destination address */
+        uint64_t value = uctx->uc_mcontext.gregs[REG_RAX];     /* Value to store */
+        
+        printf("REP STOS: count=%lu, dest=0x%lx, value=0x%lx, size=%d\n",
+               count, dest_addr, value, stos_size);
+        
+        /* Find which device this address range belongs to */
+        for (int i = 0; i < device_count; i++) {
+            uint32_t device_base = devices[i].base_address;
+            uint32_t device_size = devices[i].size;
+            
+            /* Check if the start address falls within this device's range */
+            if (dest_addr >= device_base && dest_addr < device_base + device_size) {
+                printf("REP STOS operation targeting device %d (base=0x%x, size=0x%x)\n",
+                       devices[i].device_id, device_base, device_size);
+                
+                /* Ensure the entire operation stays within device bounds */
+                uint64_t end_addr = dest_addr + (count * stos_size);
+                if (end_addr > device_base + device_size) {
+                    printf("WARNING: REP STOS operation extends beyond device bounds, truncating\n");
+                    count = (device_base + device_size - dest_addr) / stos_size;
+                }
+                
+                /* Perform bulk write operation */
+                printf("Performing bulk write: %lu x %d-byte writes starting at 0x%lx\n",
+                       count, stos_size, dest_addr);
+                
+                for (uint64_t j = 0; j < count; j++) {
+                    uint32_t write_addr = (uint32_t)(dest_addr + j * stos_size);
+                    uint64_t write_val = value;
+                    
+                    /* Mask value according to size */
+                    if (stos_size == 1) {
+                        write_val &= 0xFF;
+                    } else if (stos_size == 2) {
+                        write_val &= 0xFFFF;
+                    } else {
+                        write_val &= 0xFFFFFFFF;
+                    }
+                    
+                    /* Send write command to device model */
+                    protocol_message_t message = {0};
+                    message.device_id = devices[i].device_id;
+                    message.command = CMD_WRITE;
+                    message.address = write_addr;
+                    message.length = stos_size;
+                    memcpy(message.data, &write_val, stos_size);
+                    
+                    protocol_message_t response = {0};
+                    if (send_message_to_model(&message, &response) != 0) {
+                        printf("Failed to send write command for REP STOS operation\n");
+                        break;
+                    }
+                    
+                    if (response.result != RESULT_SUCCESS) {
+                        printf("Device model returned error for REP STOS write\n");
+                        break;
+                    }
+                }
+                
+                /* Update CPU registers to reflect completed REP STOS operation */
+                uctx->uc_mcontext.gregs[REG_RCX] = 0; /* Count decrements to 0 */
+                uctx->uc_mcontext.gregs[REG_RDI] = dest_addr + (count * stos_size); /* Final destination */
+                
+                printf("REP STOS completed: RCX=0, RDI=0x%lx\n", 
+                       (uint64_t)uctx->uc_mcontext.gregs[REG_RDI]);
+                
+                /* Skip the entire REP STOS instruction */
+                uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
+                printf("Advanced RIP by %d bytes (from 0x%lx to 0x%lx)\n",
+                       inst_length, rip, rip + inst_length);
+                
+                return; /* REP STOS handling complete */
+            }
+        }
+        
+        /* If we get here, the address is not in any registered device */
+        printf("REP STOS targeting unmapped address 0x%lx\n", dest_addr);
+        exit(1);
+    }
+    
     /* Determine if it's a read or write instruction and access size */
     int is_write = 0;
     uint32_t access_size = 4; /* Default to 4 bytes */
