@@ -116,6 +116,64 @@ static int get_instruction_length(uint8_t *instruction) {
     return length;
 }
 
+/* Helper function to extract destination register from ModR/M byte for read operations */
+static int get_destination_register_from_modrm(uint8_t *instruction, int is_two_byte_opcode, uint8_t opcode) {
+    (void)opcode; /* Mark parameter as used - may be needed for future instruction-specific handling */
+    uint8_t *inst_ptr = instruction;
+    
+    /* Skip prefixes */
+    while (*inst_ptr == 0xF0 || *inst_ptr == 0xF2 || *inst_ptr == 0xF3 ||
+           *inst_ptr == 0x2E || *inst_ptr == 0x36 || *inst_ptr == 0x3E ||
+           *inst_ptr == 0x26 || *inst_ptr == 0x64 || *inst_ptr == 0x65 ||
+           *inst_ptr == 0x66 || *inst_ptr == 0x67) {
+        inst_ptr++;
+    }
+    
+    /* Skip REX prefix if present */
+    uint8_t rex_prefix = 0;
+    if (*inst_ptr >= 0x40 && *inst_ptr <= 0x4F) {
+        rex_prefix = *inst_ptr;
+        inst_ptr++;
+    }
+    
+    /* Skip opcode(s) */
+    inst_ptr++; /* Skip first opcode byte */
+    if (is_two_byte_opcode) {
+        inst_ptr++; /* Skip second opcode byte for 0x0F prefixed instructions */
+    }
+    
+    /* Get ModR/M byte */
+    uint8_t modrm = *inst_ptr;
+    uint8_t reg_field = (modrm >> 3) & 0x07; /* Bits 5-3 contain register field */
+    
+    /* Apply REX.R extension if present */
+    if (rex_prefix & 0x04) { /* REX.R bit set */
+        reg_field |= 0x08;
+    }
+    
+    /* Map register field to x86-64 register constants */
+    /* For most read instructions, the reg field specifies the destination register */
+    switch (reg_field) {
+        case 0: return REG_RAX;
+        case 1: return REG_RCX;
+        case 2: return REG_RDX;
+        case 3: return REG_RBX;
+        case 4: return REG_RSP;
+        case 5: return REG_RBP;
+        case 6: return REG_RSI;
+        case 7: return REG_RDI;
+        case 8: return REG_R8;
+        case 9: return REG_R9;
+        case 10: return REG_R10;
+        case 11: return REG_R11;
+        case 12: return REG_R12;
+        case 13: return REG_R13;
+        case 14: return REG_R14;
+        case 15: return REG_R15;
+        default: return REG_RAX; /* Default fallback */
+    }
+}
+
 /* Signal handler for memory access violations */
 static void segv_handler(int sig, siginfo_t *info, void *context) {
     (void)sig; /* Mark parameter as used */
@@ -298,13 +356,31 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             protocol_message_t response = {0};
             if (send_message_to_model(&message, &response) == 0) {
                 if (!is_write && response.result == RESULT_SUCCESS) {
-                    /* For reads, simulate storing result back to memory location */
+                    /* For reads, backfill the destination register with the read data */
                     uint64_t read_data = 0;
                     memcpy(&read_data, response.data, access_size);
                     printf("Read completed, %d-byte data: 0x%lx\n", access_size, read_data);
                     
-                    /* In a real implementation, we would update the destination register 
-                     * based on the instruction's ModR/M byte. For now, just complete the operation. */
+                    /* Determine destination register from ModR/M byte and update it */
+                    int dest_reg = get_destination_register_from_modrm(instruction, is_two_byte_opcode, 
+                                                                     is_two_byte_opcode ? second_opcode : first_opcode);
+                    
+                    /* Update the destination register based on access size */
+                    if (access_size == 1) {
+                        /* 8-bit read: only update low byte, preserve high bits */
+                        uctx->uc_mcontext.gregs[dest_reg] = (uctx->uc_mcontext.gregs[dest_reg] & 0xFFFFFFFFFFFFFF00ULL) | (read_data & 0xFF);
+                    } else if (access_size == 2) {
+                        /* 16-bit read: only update low 16 bits, preserve high bits */
+                        uctx->uc_mcontext.gregs[dest_reg] = (uctx->uc_mcontext.gregs[dest_reg] & 0xFFFFFFFFFFFF0000ULL) | (read_data & 0xFFFF);
+                    } else if (access_size == 4) {
+                        /* 32-bit read: clear high 32 bits, set low 32 bits (x86-64 convention) */
+                        uctx->uc_mcontext.gregs[dest_reg] = read_data & 0xFFFFFFFF;
+                    } else {
+                        /* 64-bit read: set entire register */
+                        uctx->uc_mcontext.gregs[dest_reg] = read_data;
+                    }
+                    
+                    printf("Updated register %d with read data: 0x%llx\n", dest_reg, (unsigned long long)uctx->uc_mcontext.gregs[dest_reg]);
                 }
                 
                 /* Advance RIP to skip the faulting instruction using calculated length */
