@@ -227,8 +227,101 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
         }
     }
     
-    /* Handle REP STOS instructions */
-    if (is_rep_stos) {
+    /* Check for AVX/SIMD memset patterns (VEX prefix 0xC5) */
+    uint8_t *avx_inst_ptr = instruction;
+    int is_avx_memset = 0;
+    
+    if (*avx_inst_ptr == 0xC5) {
+        /* This is a VEX-encoded AVX instruction, common in optimized memset */
+        printf("Detected VEX-encoded AVX instruction (likely optimized memset)\n");
+        
+        /* For AVX memset, we'll simulate it as a series of writes based on the fault address */
+        /* We can't easily decode the full AVX instruction, but we can infer the operation */
+        /* from the context and handle it as a bulk write operation */
+        
+        /* Try to determine the operation size from the second VEX byte */
+        avx_inst_ptr++; /* Skip 0xC5 */
+        uint8_t vex_byte2 = *avx_inst_ptr;
+        (void)vex_byte2; /* Mark as used to avoid compiler warning */
+        
+        /* For now, treat AVX memset as a conservative bulk operation */
+        /* We'll use heuristics: if RCX contains a reasonable count, use it */
+        uint64_t rcx_val = uctx->uc_mcontext.gregs[REG_RCX];
+        uint64_t rdi_val = uctx->uc_mcontext.gregs[REG_RDI];
+        
+        /* If RDI points to our device memory and RCX looks like a count, handle as bulk write */
+        for (int i = 0; i < device_count; i++) {
+            uint32_t device_base = devices[i].base_address;
+            uint32_t device_size = devices[i].size;
+            
+            if (fault_addr >= device_base && fault_addr < device_base + device_size) {
+                /* This AVX instruction is targeting our device memory */
+                if (rcx_val > 0 && rcx_val <= 1024 && rdi_val == fault_addr) {
+                    /* Looks like a memset pattern: RDI=destination, RCX=count */
+                    is_avx_memset = 1;
+                    printf("AVX memset pattern detected: dest=0x%lx, count=%lu\n", rdi_val, rcx_val);
+                    
+                    /* Perform conservative byte-wise memset simulation */
+                    uint64_t value = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Use AL for value */
+                    
+                    printf("Simulating AVX memset: %lu bytes of 0x%02lx at 0x%lx\n", 
+                           rcx_val, value, rdi_val);
+                    
+                    for (uint64_t j = 0; j < rcx_val; j++) {
+                        uint32_t write_addr = (uint32_t)(rdi_val + j);
+                        
+                        /* Ensure we stay within device bounds */
+                        if (write_addr >= device_base + device_size) {
+                            break;
+                        }
+                        
+                        protocol_message_t message = {0};
+                        message.device_id = devices[i].device_id;
+                        message.command = CMD_WRITE;
+                        message.address = write_addr;
+                        message.length = 1;
+                        uint8_t write_val = (uint8_t)value;
+                        memcpy(message.data, &write_val, 1);
+                        
+                        protocol_message_t response = {0};
+                        if (send_message_to_model(&message, &response) != 0) {
+                            printf("Failed to send AVX memset write\n");
+                            break;
+                        }
+                    }
+                    
+                    /* Update registers to simulate completion */
+                    uctx->uc_mcontext.gregs[REG_RCX] = 0;
+                    uctx->uc_mcontext.gregs[REG_RDI] = rdi_val + rcx_val;
+                    
+                    /* Skip the AVX instruction (conservative approach) */
+                    uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
+                    printf("AVX memset simulation completed, advanced RIP by %d bytes\n", inst_length);
+                    
+                    return;
+                } else {
+                    /* AVX instruction but doesn't look like memset, fall back to single operation */
+                    printf("AVX instruction targeting device but not memset pattern, treating as single write\n");
+                    is_avx_memset = 0;
+                }
+                break;
+            }
+        }
+        
+        if (!is_avx_memset) {
+            /* AVX instruction but not targeting our device or not memset pattern */
+            printf("AVX instruction not targeting device memory or not memset, treating as regular instruction\n");
+        }
+    }
+    
+    /* Handle REP STOS or AVX memset instructions */
+    if (is_rep_stos || is_avx_memset) {
+        if (is_avx_memset) {
+            /* AVX memset was already handled above */
+            return;
+        }
+        
+        /* Handle REP STOS instructions */
         /* Extract registers for REP STOS operation */
         uint64_t count = uctx->uc_mcontext.gregs[REG_RCX];     /* Count of operations */
         uint64_t dest_addr = uctx->uc_mcontext.gregs[REG_RDI]; /* Destination address */
