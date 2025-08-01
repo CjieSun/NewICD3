@@ -42,6 +42,11 @@ DRIVER_SRCS = $(SRC_DIR)/driver_layer/device_driver.c
 APP_SRCS = $(SRC_DIR)/app_layer/main.c
 TEST_SRCS = $(TEST_DIR)/test_interface_layer.c
 
+# Legacy test files (consolidated for reference)
+LEGACY_TEST_SRCS = $(TEST_DIR)/legacy/test_memset_issue.c \
+                   $(TEST_DIR)/legacy/test_rep_stos.c \
+                   $(TEST_DIR)/legacy/test_driver_memset.c
+
 # Object files
 INTERFACE_OBJS = $(BUILD_DIR)/driver_interface.o
 LOGGING_OBJS = $(BUILD_DIR)/logging.o
@@ -49,11 +54,16 @@ DRIVER_OBJS = $(BUILD_DIR)/device_driver.o
 APP_OBJS = $(BUILD_DIR)/main.o
 TEST_OBJS = $(BUILD_DIR)/test_interface_layer.o
 
+# Legacy test executables
+LEGACY_TEST_TARGETS = $(BIN_DIR)/test_memset_issue \
+                      $(BIN_DIR)/test_rep_stos \
+                      $(BIN_DIR)/test_driver_memset
+
 # Targets
 MAIN_TARGET = $(BIN_DIR)/icd3_simulator
 TEST_TARGET = $(BIN_DIR)/test_interface_layer
 
-.PHONY: all clean test directories format check-format help
+.PHONY: all clean test legacy-tests directories format check-format help
 
 all: directories $(MAIN_TARGET) $(TEST_TARGET)
 
@@ -82,6 +92,27 @@ $(BUILD_DIR)/main.o: $(APP_SRCS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/test_interface_layer.o: $(TEST_SRCS)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# Legacy test targets (optional - for compatibility)
+legacy-tests: directories $(LEGACY_TEST_TARGETS)
+
+$(BIN_DIR)/test_memset_issue: $(INTERFACE_OBJS) $(LOGGING_OBJS) $(BUILD_DIR)/test_memset_issue.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BIN_DIR)/test_rep_stos: $(INTERFACE_OBJS) $(LOGGING_OBJS) $(BUILD_DIR)/test_rep_stos.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BIN_DIR)/test_driver_memset: $(INTERFACE_OBJS) $(LOGGING_OBJS) $(BUILD_DIR)/test_driver_memset.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD_DIR)/test_memset_issue.o: $(TEST_DIR)/legacy/test_memset_issue.c
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/test_rep_stos.o: $(TEST_DIR)/legacy/test_rep_stos.c
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/test_driver_memset.o: $(TEST_DIR)/legacy/test_driver_memset.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Code formatting and quality
@@ -136,6 +167,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all              - Build all targets (default)"
 	@echo "  test             - Run unit tests with enhanced output"
+	@echo "  legacy-tests     - Build legacy test executables (optional)"
 	@echo "  integration-test - Run integration tests"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  format           - Format source code with clang-format"
@@ -148,10 +180,12 @@ help:
 	@echo "  Interface Layer      - src/interface_layer/ - Memory protection & signal handling"
 	@echo "  Device Models        - src/device_models/ - Python hardware behavior simulation"
 	@echo "  Tests                - tests/             - Comprehensive test suite"
+	@echo "  Legacy Tests         - tests/legacy/      - Archived standalone test files"
 	@echo ""
 	@echo "Build artifacts:"
 	@echo "  $(MAIN_TARGET) - Main simulator executable"
 	@echo "  $(TEST_TARGET)  - Test suite executable"
+	@echo "  Legacy test executables available via 'make legacy-tests'"
 	@echo ""
 	@echo "Prerequisites:"
 	@echo "  - GCC compiler"
