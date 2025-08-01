@@ -23,6 +23,98 @@ static int device_count = 0;
 static int server_socket = -1;
 static interrupt_handler_t interrupt_handlers[MAX_DEVICES];
 
+/* Function to calculate x86-64 instruction length */
+static int get_instruction_length(uint8_t *instruction) {
+    uint8_t *inst_ptr = instruction;
+    int length = 0;
+    
+    /* Legacy prefixes (can have multiple) */
+    while (*inst_ptr == 0xF0 || *inst_ptr == 0xF2 || *inst_ptr == 0xF3 ||  /* LOCK, REPNE, REP */
+           *inst_ptr == 0x2E || *inst_ptr == 0x36 || *inst_ptr == 0x3E ||  /* Segment overrides */
+           *inst_ptr == 0x26 || *inst_ptr == 0x64 || *inst_ptr == 0x65 ||
+           *inst_ptr == 0x66 || *inst_ptr == 0x67) {                       /* Operand/Address size */
+        inst_ptr++;
+        length++;
+    }
+    
+    /* REX prefix (only in 64-bit mode) */
+    if (*inst_ptr >= 0x40 && *inst_ptr <= 0x4F) {
+        inst_ptr++;
+        length++;
+    }
+    
+    /* Opcode (1-3 bytes) */
+    uint8_t opcode = *inst_ptr++;
+    length++;
+    
+    /* Handle two-byte opcodes */
+    if (opcode == 0x0F) {
+        opcode = *inst_ptr++;
+        length++;
+        
+        /* Handle three-byte opcodes */
+        if (opcode == 0x38 || opcode == 0x3A) {
+            inst_ptr++;
+            length++;
+        }
+    }
+    
+    /* ModR/M byte analysis */
+    uint8_t modrm = *inst_ptr;
+    uint8_t mod = (modrm >> 6) & 0x03;
+    uint8_t rm = modrm & 0x07;
+    
+    /* Check if this instruction has ModR/M byte */
+    int has_modrm = 0;
+    
+    /* Single-byte opcodes that have ModR/M */
+    if (opcode == 0x88 || opcode == 0x89 || opcode == 0x8A || opcode == 0x8B ||
+        opcode == 0xC6 || opcode == 0xC7) {
+        has_modrm = 1;
+    }
+    /* Two-byte opcodes that have ModR/M (0x0F prefix already consumed) */
+    else if (opcode == 0xB6 || opcode == 0xB7 || opcode == 0xBE || opcode == 0xBF) {
+        has_modrm = 1;
+    }
+    
+    if (has_modrm) {
+        inst_ptr++;
+        length++;
+        
+        /* SIB byte (if needed) */
+        if (mod != 0x03 && rm == 0x04) {
+            inst_ptr++;
+            length++;
+        }
+        
+        /* Displacement */
+        if (mod == 0x01) {
+            length += 1;  /* 8-bit displacement */
+        } else if (mod == 0x02 || (mod == 0x00 && rm == 0x05)) {
+            length += 4;  /* 32-bit displacement */
+        }
+        
+        /* Immediate data */
+        if (opcode == 0xC6) {
+            length += 1;  /* 8-bit immediate */
+        } else if (opcode == 0xC7) {
+            /* Check for 16-bit operand size prefix */
+            uint8_t *check_ptr = instruction;
+            int has_66_prefix = 0;
+            while (check_ptr < inst_ptr - 1) {
+                if (*check_ptr == 0x66) {
+                    has_66_prefix = 1;
+                    break;
+                }
+                check_ptr++;
+            }
+            length += has_66_prefix ? 2 : 4;  /* 16-bit or 32-bit immediate */
+        }
+    }
+    
+    return length;
+}
+
 /* Signal handler for memory access violations */
 static void segv_handler(int sig, siginfo_t *info, void *context) {
     (void)sig; /* Mark parameter as used */
@@ -33,6 +125,17 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     uintptr_t rip = (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP];
     uint8_t *instruction = (uint8_t *)rip;
     
+    /* Calculate instruction length */
+    int inst_length = get_instruction_length(instruction);
+    printf("Instruction at RIP 0x%lx, length: %d bytes\n", rip, inst_length);
+    
+    /* Print the instruction bytes in hex */
+    printf("Instruction bytes: ");
+    for (int i = 0; i < inst_length && i < 15; i++) {  /* Limit to 15 bytes max for safety */
+        printf("%02X ", instruction[i]);
+    }
+    printf("\n");
+    
     /* Determine if it's a read or write instruction and access size */
     int is_write = 0;
     uint32_t access_size = 4; /* Default to 4 bytes */
@@ -40,92 +143,149 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     
     /* Enhanced x86-64 instruction parsing */
     uint8_t *inst_ptr = instruction;
+    int has_66_prefix = 0;  /* Track 16-bit operand size prefix */
+    int is_two_byte_opcode = 0;  /* Track two-byte opcodes (0x0F prefix) */
+    uint8_t first_opcode = 0;
+    uint8_t second_opcode = 0;
+    
+    /* Skip prefixes and find the actual opcode */
+    while (*inst_ptr == 0xF0 || *inst_ptr == 0xF2 || *inst_ptr == 0xF3 ||
+           *inst_ptr == 0x2E || *inst_ptr == 0x36 || *inst_ptr == 0x3E ||
+           *inst_ptr == 0x26 || *inst_ptr == 0x64 || *inst_ptr == 0x65 ||
+           *inst_ptr == 0x67) {
+        inst_ptr++;
+    }
+    
+    /* Check for 16-bit operand size prefix */
+    if (*inst_ptr == 0x66) {
+        has_66_prefix = 1;
+        inst_ptr++;
+    }
     
     /* Skip REX prefix if present (0x40-0x4F) */
     if (*inst_ptr >= 0x40 && *inst_ptr <= 0x4F) {
         inst_ptr++;
     }
-    
+
+    /* Get the opcode(s) */
+    first_opcode = *inst_ptr++;
+    if (first_opcode == 0x0F) {
+        is_two_byte_opcode = 1;
+        second_opcode = *inst_ptr;
+    }
+
     /* Parse instruction opcode and determine size/operation */
-    switch (*inst_ptr) {
-        case 0x8A: /* mov r8, [mem] - 8-bit read */
-            is_write = 0;
-            access_size = 1;
-            printf("Detected 8-bit READ instruction (0x8A) at RIP 0x%lx\n", rip);
-            break;
-        case 0x8B: /* mov r32, [mem] - 32-bit read */
-            is_write = 0;
-            access_size = 4;
-            printf("Detected 32-bit READ instruction (0x8B) at RIP 0x%lx\n", rip);
-            break;
-        case 0x88: /* mov [mem], r8 - 8-bit write */
-            is_write = 1;
-            access_size = 1;
-            printf("Detected 8-bit WRITE instruction (0x88) at RIP 0x%lx\n", rip);
-            /* Extract 8-bit data from low byte of register */
-            write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Simplified: assume AL register */
-            break;
-        case 0x89: /* mov [mem], r32 - 32-bit write */
-            is_write = 1;
-            access_size = 4;
-            printf("Detected 32-bit WRITE instruction (0x89) at RIP 0x%lx\n", rip);
-            /* Extract 32-bit data from register */
-            write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF; /* Simplified: assume EAX register */
-            break;
-        case 0x66: /* 16-bit operand size prefix */
-            inst_ptr++;
-            if (*inst_ptr == 0x8B) { /* mov r16, [mem] - 16-bit read */
+    if (is_two_byte_opcode) {
+        /* Handle two-byte opcodes (0x0F prefix) */
+        switch (second_opcode) {
+            case 0xB6: /* movzbl [mem], r32 - zero-extend 8-bit read */
+                is_write = 0;
+                access_size = 1;
+                printf("Detected MOVZBL (0x0F 0xB6) 8-bit zero-extend READ instruction at RIP 0x%lx\n", rip);
+                break;
+            case 0xB7: /* movzwl [mem], r32 - zero-extend 16-bit read */
                 is_write = 0;
                 access_size = 2;
-                printf("Detected 16-bit READ instruction (0x66 0x8B) at RIP 0x%lx\n", rip);
-            } else if (*inst_ptr == 0x89) { /* mov [mem], r16 - 16-bit write */
-                is_write = 1;
+                printf("Detected MOVZWL (0x0F 0xB7) 16-bit zero-extend READ instruction at RIP 0x%lx\n", rip);
+                break;
+            case 0xBE: /* movsbl [mem], r32 - sign-extend 8-bit read */
+                is_write = 0;
+                access_size = 1;
+                printf("Detected MOVSBL (0x0F 0xBE) 8-bit sign-extend READ instruction at RIP 0x%lx\n", rip);
+                break;
+            case 0xBF: /* movswl [mem], r32 - sign-extend 16-bit read */
+                is_write = 0;
                 access_size = 2;
-                printf("Detected 16-bit WRITE instruction (0x66 0x89) at RIP 0x%lx\n", rip);
-                write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFF; /* Simplified: assume AX register */
-            } else if (*inst_ptr == 0xC7) { /* mov [mem], imm16 - 16-bit immediate write */
+                printf("Detected MOVSWL (0x0F 0xBF) 16-bit sign-extend READ instruction at RIP 0x%lx\n", rip);
+                break;
+            default:
+                /* Unknown two-byte instruction - treat as 32-bit read for safety */
+                is_write = 0;
+                access_size = 4;
+                printf("Unknown two-byte instruction 0x0F 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", second_opcode, rip);
+                break;
+        }
+    } else {
+        /* Handle single-byte opcodes */
+        switch (first_opcode) {
+            case 0x8A: /* mov r8, [mem] - 8-bit read */
+                is_write = 0;
+                access_size = 1;
+                printf("Detected 8-bit READ instruction (0x8A) at RIP 0x%lx\n", rip);
+                break;
+            case 0x8B: /* mov r32/r16, [mem] - 32/16-bit read */
+                is_write = 0;
+                access_size = has_66_prefix ? 2 : 4;
+                printf("Detected %d-bit READ instruction (0x8B) at RIP 0x%lx\n", access_size * 8, rip);
+                break;
+            case 0x88: /* mov [mem], r8 - 8-bit write */
                 is_write = 1;
-                access_size = 2;
-                printf("Detected 16-bit immediate WRITE instruction (0x66 0xC7) at RIP 0x%lx\n", rip);
-                /* Extract immediate value (simplified - would need full ModR/M parsing) */
-                write_data = 0x1234; /* Placeholder */
-            }
-            break;
-        case 0xC6: /* mov [mem], imm8 - 8-bit immediate write */
-            is_write = 1;
-            access_size = 1;
-            printf("Detected 8-bit immediate WRITE instruction (0xC6) at RIP 0x%lx\n", rip);
-            write_data = 0x12; /* Placeholder */
-            break;
-        case 0xC7: /* mov [mem], imm32 - 32-bit immediate write */
-            is_write = 1;
-            access_size = 4;
-            printf("Detected 32-bit immediate WRITE instruction (0xC7) at RIP 0x%lx\n", rip);
-            write_data = 0x12345678; /* Placeholder */
-            break;
-        default:
-            /* Unknown instruction - treat as 32-bit read for safety */
-            is_write = 0;
-            access_size = 4;
-            printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", *inst_ptr, rip);
-            break;
+                access_size = 1;
+                printf("Detected 8-bit WRITE instruction (0x88) at RIP 0x%lx\n", rip);
+                /* Extract 8-bit data from low byte of register */
+                write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Simplified: assume AL register */
+                break;
+            case 0x89: /* mov [mem], r32/r16 - 32/16-bit write */
+                is_write = 1;
+                access_size = has_66_prefix ? 2 : 4;
+                printf("Detected %d-bit WRITE instruction (0x89) at RIP 0x%lx\n", access_size * 8, rip);
+                /* Extract data from register */
+                if (has_66_prefix) {
+                    write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFF; /* 16-bit */
+                } else {
+                    write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF; /* 32-bit */
+                }
+                break;
+            case 0xC6: /* mov [mem], imm8 - 8-bit immediate write */
+                is_write = 1;
+                access_size = 1;
+                printf("Detected 8-bit immediate WRITE instruction (0xC6) at RIP 0x%lx\n", rip);
+                /* Extract immediate value from instruction stream */
+                uint8_t *imm_ptr = instruction + inst_length - 1; /* Last byte is immediate */
+                write_data = *imm_ptr;
+                break;
+            case 0xC7: /* mov [mem], imm32/imm16 - 32/16-bit immediate write */
+                is_write = 1;
+                access_size = has_66_prefix ? 2 : 4;
+                printf("Detected %d-bit immediate WRITE instruction (0xC7) at RIP 0x%lx\n", access_size * 8, rip);
+                /* Extract immediate value from instruction stream */
+                if (has_66_prefix) {
+                    uint8_t *imm_ptr = instruction + inst_length - 2; /* Last 2 bytes are immediate */
+                    write_data = *(uint16_t *)imm_ptr;
+                } else {
+                    uint8_t *imm_ptr = instruction + inst_length - 4; /* Last 4 bytes are immediate */
+                    write_data = *(uint32_t *)imm_ptr;
+                }
+                break;
+            default:
+                /* Unknown instruction - treat as 32-bit read for safety */
+                is_write = 0;
+                access_size = 4;
+                printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", first_opcode, rip);
+                break;
+        }
     }
     
-    /* Find which device this address belongs to */
+    /* Find which device this address belongs to by comparing with device base addresses */
+    printf("Looking for device containing fault address 0x%lx\n", fault_addr);
+    printf("Current device count: %d\n", device_count);
+    
     for (int i = 0; i < device_count; i++) {
-        uintptr_t base = (uintptr_t)devices[i].mapped_memory;
-        if (fault_addr >= base && fault_addr < base + devices[i].size) {
-            uint32_t offset = fault_addr - base;
-            uint32_t device_addr = devices[i].base_address + offset;
-            
-            printf("Memory access violation at device %d, address 0x%x (%s, %d bytes)\n", 
-                   devices[i].device_id, device_addr, is_write ? "WRITE" : "READ", access_size);
+        uint32_t device_base = devices[i].base_address;
+        uint32_t device_size = devices[i].size;
+        printf("Device %d: base_address=0x%x, size=0x%x, range=0x%x-0x%x\n", 
+               devices[i].device_id, device_base, device_size, device_base, device_base + device_size - 1);
+        
+        /* Check if fault address falls within this device's address range */
+        if (fault_addr >= device_base && fault_addr < device_base + device_size) {
+            printf("Memory access violation at device %d, address 0x%lx (%s, %d bytes)\n", 
+                   devices[i].device_id, fault_addr, is_write ? "WRITE" : "READ", access_size);
             
             /* Handle the actual read/write operation by sending it to the device model */
             protocol_message_t message = {0};
             message.device_id = devices[i].device_id;
             message.command = is_write ? CMD_WRITE : CMD_READ;
-            message.address = device_addr;
+            message.address = (uint32_t)fault_addr;
             message.length = access_size;
             
             if (is_write) {
@@ -146,10 +306,10 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
                      * based on the instruction's ModR/M byte. For now, just complete the operation. */
                 }
                 
-                /* Advance RIP to skip the faulting instruction */
-                /* This is a simplified approach - real implementation would need 
-                 * proper instruction length calculation */
-                uctx->uc_mcontext.gregs[REG_RIP] += (access_size == 2 && instruction[0] == 0x66) ? 3 : 2;
+                /* Advance RIP to skip the faulting instruction using calculated length */
+                printf("Advancing RIP by %d bytes (from 0x%lx to 0x%lx)\n", 
+                       inst_length, rip, rip + inst_length);
+                uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
             }
             return;
         }
