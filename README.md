@@ -46,6 +46,7 @@ NewICD3 is a universal IC simulator with **layered decoupled** architecture, imp
 - **对接Python模型层**: 当模型有异常或中断发生，调用中断接口反馈到驱动
 - **通信协议**: 使用socket通信，协议包含发起方设备ID、操作命令、地址、长度、数据、执行结果
 - **内存保护**: 通过预设置设备寄存器和memory的访问属性(mmap + PROT_NONE)，当发生读写时进入handler处理
+- **📢 NEW: memset支持**: segv_handler现在支持REP STOS* 指令族，完整支持memset批量内存操作
 
 #### 2. 通信协议 (Communication Protocol)
 ```c
@@ -158,6 +159,47 @@ register_interrupt_handler(1, my_interrupt_handler);
 // 触发中断 (通常由设备模型调用)
 trigger_interrupt(1, 0x10);
 ```
+
+## 📢 memset 支持 (memset Support)
+
+NewICD3 现在完整支持 memset 批量内存操作！segv_handler 已扩展支持 REP STOS* 指令族。
+
+### 支持的指令 (Supported Instructions)
+- **REP STOSB** (0xF3 0xAA) - 8位内存填充
+- **REP STOSW** (0xF3 0x66 0xAB) - 16位内存填充  
+- **REP STOSD** (0xF3 0xAB) - 32位内存填充
+- **REP STOSQ** (0xF3 0x48 0xAB) - 64位内存填充
+
+### 使用示例 (Usage Examples)
+```c
+// 基本 memset 操作 - 现在完全支持！
+uint8_t *device_buffer = (uint8_t *)0x40000000;
+memset(device_buffer, 0xAA, 1024);  // ✅ 现在可以工作！
+
+// 零填充操作
+struct uart_regs *uart = (struct uart_regs *)0x40000000;
+memset(uart, 0, sizeof(*uart));     // ✅ 设备寄存器初始化
+
+// DMA 缓冲区设置
+uint8_t *dma_buffer = (uint8_t *)0x50000000;
+memset(dma_buffer, 0xFF, DMA_BUFFER_SIZE);  // ✅ 批量填充
+```
+
+### 特性 (Features)
+- ✅ **透明支持**: 无需修改现有代码
+- ✅ **完整覆盖**: 支持所有 REP STOS* 指令变体
+- ✅ **批量转换**: REP 操作转换为独立的设备模型写操作
+- ✅ **寄存器管理**: 正确更新 RDI、RCX、RIP 寄存器状态
+- ✅ **向后兼容**: 保持与现有功能的完全兼容性
+
+### 演示程序 (Demonstration)
+```bash
+# 编译并运行 memset 演示
+make clean && make
+./demo_memset
+```
+
+详细信息请参阅 [MEMSET_SUPPORT.md](MEMSET_SUPPORT.md)
 
 ## 测试框架 (Test Framework)
 
