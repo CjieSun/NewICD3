@@ -38,6 +38,34 @@ import threading
 import time
 import os
 import sys
+import logging
+
+# Setup logging for Python model interface
+def setup_logging():
+    """Configure logging with file/function information and level control"""
+    # Get log level from environment variable
+    log_level_str = os.getenv('ICD3_LOG_LEVEL', 'INFO').upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    
+    # Configure logging format to match C logging
+    formatter = logging.Formatter(
+        '[%(asctime)s.%(msecs)03d] [%(levelname)s] [%(filename)s:%(funcName)s] %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    
+    # Setup console handler
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    
+    # Get logger and configure
+    logger = logging.getLogger('NewICD3')
+    logger.setLevel(log_level)
+    logger.addHandler(handler)
+    
+    return logger
+
+# Initialize logger
+logger = setup_logging()
 
 # Protocol definitions (must match C definitions)
 CMD_READ = 0x01
@@ -68,32 +96,32 @@ class ModelInterface:
         # Remove existing socket
         try:
             os.unlink(SOCKET_PATH)
-            print(f"Removed existing socket: {SOCKET_PATH}")
+            logger.info(f"Removed existing socket: {SOCKET_PATH}")
         except OSError:
-            print(f"No existing socket to remove: {SOCKET_PATH}")
+            logger.info(f"No existing socket to remove: {SOCKET_PATH}")
             
         # Create and bind socket
         try:
             self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.socket.bind(SOCKET_PATH)
             self.socket.listen(5)
-            print(f"Device model {self.device_id} started on {SOCKET_PATH}")
-            print(f"Socket file exists: {os.path.exists(SOCKET_PATH)}")
+            logger.info(f"Device model {self.device_id} started on {SOCKET_PATH}")
+            logger.debug(f"Socket file exists: {os.path.exists(SOCKET_PATH)}")
         except Exception as e:
-            print(f"Failed to create socket: {e}")
+            logger.error(f"Failed to create socket: {e}")
             return
         
         while self.running:
             try:
-                print("Waiting for client connection...")
+                logger.debug("Waiting for client connection...")
                 client, addr = self.socket.accept()
-                print(f"Client connected")
+                logger.info(f"Client connected")
                 self.client_sockets.append(client)
                 # Handle client in separate thread
                 threading.Thread(target=self.handle_client, args=(client,)).start()
             except OSError as e:
                 if self.running:  # Only print error if we're still supposed to be running
-                    print(f"Socket error: {e}")
+                    logger.error(f"Socket error: {e}")
                 break
     def stop(self):
         """Stop the device model server"""
@@ -116,7 +144,7 @@ class ModelInterface:
             
     def trigger_interrupt_to_driver(self, interrupt_id):
         """Trigger an interrupt to the driver interface"""
-        print(f"Model triggering interrupt {interrupt_id} to driver for device {self.device_id}")
+        logger.info(f"Model triggering interrupt {interrupt_id} to driver for device {self.device_id}")
         
         # Create interrupt message - device_id, command, address, length, result + data[256]
         message = struct.pack('<IIIII', self.device_id, CMD_INTERRUPT, 0, interrupt_id, RESULT_SUCCESS)
@@ -126,9 +154,9 @@ class ModelInterface:
         for client in self.client_sockets[:]:  # Use slice to avoid modification during iteration
             try:
                 client.send(message)
-                print(f"Interrupt {interrupt_id} sent to driver")
+                logger.debug(f"Interrupt {interrupt_id} sent to driver")
             except Exception as e:
-                print(f"Failed to send interrupt to client: {e}")
+                logger.error(f"Failed to send interrupt to client: {e}")
                 # Remove failed client
                 if client in self.client_sockets:
                     self.client_sockets.remove(client)
@@ -175,13 +203,13 @@ class ModelInterface:
                 device_id, command, address, length, result = struct.unpack('<IIIII', data[:20])
                 message_data = data[20:20+256]  # Extract the 256-byte data array
                 
-                print(f"Received: device_id={device_id}, cmd={command}, addr=0x{address:x}, len={length}")
+                logger.debug(f"Received: device_id={device_id}, cmd={command}, addr=0x{address:x}, len={length}")
                 
                 response = self.process_command(device_id, command, address, length, message_data)
                 client_socket.send(response)
                 
         except Exception as e:
-            print(f"Error handling client: {e}")
+            logger.error(f"Error handling client: {e}")
         finally:
             # Always close the client connection after handling one message
             if client_socket in self.client_sockets:
@@ -197,26 +225,26 @@ class ModelInterface:
             # Read from register
             value = self.registers.get(address, 0xDEADBEEF)  # Default value
             response_data = struct.pack('<I', value) + b'\x00' * 252
-            print(f"Read 0x{address:x} = 0x{value:x}")
+            logger.debug(f"Read 0x{address:x} = 0x{value:x}")
             
         elif command == CMD_WRITE:
             # Write to register
             if len(data) >= 4:
                 value = struct.unpack('<I', data[:4])[0]
                 self.registers[address] = value
-                print(f"Write 0x{address:x} = 0x{value:x}")
+                logger.debug(f"Write 0x{address:x} = 0x{value:x}")
             else:
                 result = RESULT_ERROR
                 
         elif command == CMD_INIT:
-            print(f"Device {device_id} initialized")
+            logger.info(f"Device {device_id} initialized")
             
         elif command == CMD_DEINIT:
-            print(f"Device {device_id} deinitialized")
+            logger.info(f"Device {device_id} deinitialized")
             
         else:
             result = RESULT_ERROR
-            print(f"Unknown command: {command}")
+            logger.error(f"Unknown command: {command}")
             
         # Build response message with correct protocol_message_t structure
         # device_id, command, address, length, result + data[256]
@@ -233,7 +261,7 @@ def main():
     activity_thread = threading.Thread(target=model.simulate_device_activity, daemon=True)
     
     try:
-        print("Starting model interface...")
+        logger.info("Starting model interface...")
         activity_thread.start()
         model.start()
     except KeyboardInterrupt:

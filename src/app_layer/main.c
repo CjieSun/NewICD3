@@ -3,64 +3,65 @@
 #include <unistd.h>
 #include "interface_layer.h"
 #include "device_driver.h"
+#include "logging.h"
 
 /* Test cases */
 static int test_driver_initialization(void) {
-    printf("\n=== Test: Driver Initialization ===\n");
+    LOG_INFO("=== Test: Driver Initialization ===");
     
     if (device_init() != DRIVER_OK) {
-        printf("FAIL: Device initialization failed\n");
+        LOG_ERROR("Device initialization failed");
         return -1;
     }
     
-    printf("PASS: Device initialized successfully\n");
+    LOG_INFO("PASS: Device initialized successfully");
     return 0;
 }
 
 static int test_device_operations(void) {
-    printf("\n=== Test: Device Operations ===\n");
+    LOG_INFO("=== Test: Device Operations ===");
     
     /* Enable device */
     if (device_enable() != DRIVER_OK) {
-        printf("FAIL: Device enable failed\n");
+        LOG_ERROR("Device enable failed");
         return -1;
     }
     
     /* Write data */
     uint32_t test_data = 0x12345678;
     if (device_write_data(test_data) != DRIVER_OK) {
-        printf("FAIL: Device write failed\n");
+        LOG_ERROR("Device write failed");
         return -1;
     }
     
     /* Read data */
     uint32_t read_data = 0;
     if (device_read_data(&read_data) != DRIVER_OK) {
-        printf("FAIL: Device read failed\n");
+        LOG_ERROR("Device read failed");
         return -1;
     }
     
-    printf("Written: 0x%x, Read: 0x%x\n", test_data, read_data);
+    LOG_INFO("Written: 0x%x, Read: 0x%x", test_data, read_data);
     
     /* Get status */
     uint32_t status = device_get_status();
-    printf("Device status: 0x%x\n", status);
+    LOG_INFO("Device status: 0x%x", status);
     
-    printf("PASS: Device operations completed\n");
+    LOG_INFO("PASS: Device operations completed");
     return 0;
 }
 
 static int test_interrupt_handling(void) {
-    printf("\n=== Test: Interrupt Handling ===\n");
+    LOG_INFO("=== Test: Interrupt Handling ===");
     
     /* Enable interrupts */
     device_irq_enable();
     
     /* Simulate interrupt */
     if (trigger_interrupt(1, 0x10) == 0) {
-        printf("PASS: Interrupt triggered successfully\n");
+        LOG_INFO("PASS: Interrupt triggered successfully");
     } else {
-        printf("FAIL: Interrupt trigger failed\n");
+        LOG_ERROR("Interrupt trigger failed");
         return -1;
     }
     
@@ -71,16 +72,16 @@ static int test_interrupt_handling(void) {
 }
 
 static int test_register_access(void) {
-    printf("\n=== Test: Direct Register Access ===\n");
+    LOG_INFO("=== Test: Direct Register Access ===");
     
     /* Test direct register access through interface layer */
     uint32_t value = read_register(DEVICE_BASE_ADDR, 4);
-    printf("Read register value: 0x%x\n", value);
+    LOG_INFO("Read register value: 0x%x", value);
     
     if (write_register(DEVICE_BASE_ADDR, 0xAABBCCDD, 4) == 0) {
-        printf("PASS: Register write successful\n");
+        LOG_INFO("PASS: Register write successful");
     } else {
-        printf("FAIL: Register write failed\n");
+        LOG_ERROR("Register write failed");
         return -1;
     }
     
@@ -88,7 +89,7 @@ static int test_register_access(void) {
 }
 
 static int run_all_tests(void) {
-    printf("Starting NewICD3 Interface Layer Tests...\n");
+    LOG_INFO("Starting NewICD3 Interface Layer Tests...");
     
     int failures = 0;
     
@@ -97,23 +98,23 @@ static int run_all_tests(void) {
     if (test_interrupt_handling() != 0) failures++;
     if (test_register_access() != 0) failures++;
     
-    printf("\n=== Test Summary ===\n");
+    LOG_INFO("=== Test Summary ===");
     if (failures == 0) {
-        printf("All tests PASSED\n");
+        LOG_INFO("All tests PASSED");
         return 0;
     } else {
-        printf("%d test(s) FAILED\n", failures);
+        LOG_ERROR("%d test(s) FAILED", failures);
         return -1;
     }
 }
 
 int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused))) {
-    printf("NewICD3 Universal IC Simulator\n");
-    printf("==============================\n");
+    LOG_INFO("NewICD3 Universal IC Simulator");
+    LOG_INFO("==============================");
     
     /* Initialize interface layer */
     if (interface_layer_init() != 0) {
-        printf("Failed to initialize interface layer\n");
+        LOG_ERROR("Failed to initialize interface layer");
         return EXIT_FAILURE;
     }
     
@@ -124,7 +125,7 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
     device_deinit();
     interface_layer_deinit();
     
-    printf("\nSystem shutdown complete.\n");
+    LOG_INFO("System shutdown complete.");
     
     return (result == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
