@@ -51,26 +51,6 @@ static int test_device_operations(void) {
     return 0;
 }
 
-static int test_interrupt_handling(void) {
-    LOG_INFO("=== Test: Interrupt Handling ===");
-    
-    /* Enable interrupts */
-    device_irq_enable();
-    
-    /* Simulate interrupt */
-    if (trigger_interrupt(1, 0x10) == 0) {
-        LOG_INFO("PASS: Interrupt triggered successfully");
-    } else {
-        LOG_ERROR("Interrupt trigger failed");
-        return -1;
-    }
-    
-    /* Disable interrupts */
-    device_irq_disable();
-    
-    return 0;
-}
-
 static int test_register_access(void) {
     LOG_INFO("=== Test: Direct Register Access ===");
     
@@ -95,7 +75,6 @@ static int run_all_tests(void) {
     
     if (test_driver_initialization() != 0) failures++;
     if (test_device_operations() != 0) failures++;
-    if (test_interrupt_handling() != 0) failures++;
     if (test_register_access() != 0) failures++;
     
     LOG_INFO("=== Test Summary ===");

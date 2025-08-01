@@ -15,6 +15,8 @@
 #include <ucontext.h>
 
 #define MAX_DEVICES 16
+#define MAX_IRQS 16
+
 #define SOCKET_PATH "/tmp/icd3_interface"
 #define DRIVER_SOCKET_PATH "/tmp/icd3_driver_interface"
 #define DRIVER_PID_FILE "/tmp/icd3_driver_pid"
@@ -23,7 +25,7 @@
 static device_info_t devices[MAX_DEVICES];
 static int device_count = 0;
 static int server_socket = -1;
-static interrupt_handler_t interrupt_handlers[MAX_DEVICES];
+static interrupt_handler_t interrupt_handlers[MAX_IRQS];
 
 /* Signal-based interrupt handling */
 static volatile uint32_t pending_device_interrupt = 0;
@@ -200,6 +202,7 @@ static void interrupt_signal_handler(int sig, siginfo_t *info, void *context) {
             
             printf("Signal interrupt received: device_id=%d, interrupt_id=0x%x\n", 
                    device_id, interrupt_id);
+            interrupt_handlers[interrupt_id](interrupt_id);
         }
         fclose(f);
         /* File will be cleaned up by Python model */
@@ -826,17 +829,9 @@ int write_register(uint32_t address, uint32_t data, uint32_t size) {
     return -1;
 }
 
-int register_interrupt_handler(uint32_t device_id, interrupt_handler_t handler) {
-    if (device_id < MAX_DEVICES) {
-        interrupt_handlers[device_id] = handler;
-        return 0;
-    }
-    return -1;
-}
-
-int trigger_interrupt(uint32_t device_id, uint32_t interrupt_id) {
-    if (device_id < MAX_DEVICES && interrupt_handlers[device_id]) {
-        interrupt_handlers[device_id](device_id, interrupt_id);
+int register_interrupt_handler(uint32_t interrupt_id, interrupt_handler_t handler) {
+    if (interrupt_id < MAX_IRQS) {
+        interrupt_handlers[interrupt_id] = handler;
         return 0;
     }
     return -1;
@@ -913,32 +908,6 @@ simulation_fallback:
         }
     }
     return 0;
-}
-
-/* Function to process pending signal-based interrupts */
-int handle_model_interrupts(void) {
-    /* Check if there's a pending interrupt from signal handler */
-    if (interrupt_pending) {
-        uint32_t device_id = pending_device_interrupt;
-        uint32_t interrupt_id = pending_interrupt_id;
-        
-        printf("Processing signal-based interrupt: device_id=%d, interrupt_id=0x%x\n",
-               device_id, interrupt_id);
-        
-        /* Clear the pending interrupt flag */
-        interrupt_pending = 0;
-        
-        /* Trigger the interrupt handler */
-        if (trigger_interrupt(device_id, interrupt_id) == 0) {
-            printf("Signal-based interrupt processed successfully\n");
-            return 1; /* Interrupt was processed */
-        } else {
-            printf("Failed to process signal-based interrupt\n");
-            return -1;
-        }
-    }
-    
-    return 0; /* No interrupt pending */
 }
 
 /* Function to get the current process PID for signal-based interrupts */

@@ -84,44 +84,6 @@ TEST(register_access) {
     return 0;
 }
 
-TEST(interrupt_handling) {
-    static int interrupt_received = 0;
-    
-    /* Simple interrupt handler */
-    void test_interrupt_handler(uint32_t device_id, uint32_t interrupt_id) {
-        interrupt_received = 1;
-        printf("  Interrupt received from MODEL: device=%d, irq=%d\n", device_id, interrupt_id);
-    }
-    
-    if (interface_layer_init() != 0) {
-        return -1;
-    }
-    
-    /* Register interrupt handler */
-    if (register_interrupt_handler(1, test_interrupt_handler) != 0) {
-        interface_layer_deinit();
-        return -1;
-    }
-    
-    /* This simulates what would happen when the Python model triggers an interrupt.
-     * In a real scenario, this would be called by handle_model_interrupts() 
-     * when it receives an interrupt message from the Python model. */
-    printf("  Simulating interrupt from model to driver...\n");
-    if (trigger_interrupt(1, 0x10) != 0) {
-        interface_layer_deinit();
-        return -1;
-    }
-    
-    /* Check if interrupt was received */
-    if (!interrupt_received) {
-        interface_layer_deinit();
-        return -1;
-    }
-    
-    interface_layer_deinit();
-    return 0;
-}
-
 TEST(protocol_message) {
     protocol_message_t message = {0};
     protocol_message_t response = {0};
@@ -143,38 +105,16 @@ TEST(protocol_message) {
     return 0;
 }
 
-TEST(model_interrupt_handling) {
-    if (interface_layer_init() != 0) {
-        return -1;
-    }
-    
-    /* Test the model interrupt handling function */
-    printf("  Testing model interrupt handling capability...\n");
-    
-    /* This tests the infrastructure for receiving interrupts from models */
-    if (handle_model_interrupts() == 0) {
-        printf("  Model interrupt handling function available\n");
-    } else {
-        printf("  Model interrupt handling function failed\n");
-        interface_layer_deinit();
-        return -1;
-    }
-    
-    interface_layer_deinit();
-    return 0;
-}
-
 TEST(model_to_driver_interrupt_flow) {
     static int driver_interrupt_received = 0;
     static uint32_t received_device_id = 0;
     static uint32_t received_interrupt_id = 0;
     
     /* Interrupt handler for this test */
-    void test_driver_interrupt_handler(uint32_t device_id, uint32_t interrupt_id) {
+    void test_driver_interrupt_handler(uint32_t interrupt_id) {
         driver_interrupt_received = 1;
-        received_device_id = device_id;
         received_interrupt_id = interrupt_id;
-        printf("  Driver interrupt handler called: device=%d, irq=0x%x\n", device_id, interrupt_id);
+        printf("  Driver interrupt handler called: irq=0x%x\n", interrupt_id);
     }
     
     printf("  Testing end-to-end interrupt flow: Python model -> C interface -> C driver...\n");
@@ -192,7 +132,7 @@ TEST(model_to_driver_interrupt_flow) {
     }
     
     /* Register our test interrupt handler */
-    if (register_interrupt_handler(1, test_driver_interrupt_handler) != 0) {
+    if (register_interrupt_handler(10, test_driver_interrupt_handler) != 0) {
         printf("  Failed to register interrupt handler\n");
         unregister_device(1);
         interface_layer_deinit();
@@ -240,7 +180,7 @@ TEST(model_to_driver_interrupt_flow) {
     fprintf(script, "\n");
     fprintf(script, "print(f'Model has {len(model.client_sockets)} connected clients')\n");
     fprintf(script, "print('Triggering test interrupt...')\n");
-    fprintf(script, "model.trigger_interrupt_to_driver(0x42)\n");
+    fprintf(script, "model.trigger_interrupt_to_driver(10)\n");
     fprintf(script, "time.sleep(2)\n");
     fprintf(script, "\n");
     fprintf(script, "print('Stopping model...')\n");
@@ -290,23 +230,7 @@ TEST(model_to_driver_interrupt_flow) {
     /* Give the model time to trigger the interrupt */
     printf("  Waiting for interrupt from Python model...\n");
     sleep(4);
-    
-    /* In a real implementation, the interrupt would be received by the connected socket.
-     * For this test, we'll simulate receiving the interrupt by creating a test connection
-     * to demonstrate the flow works. */
-    
-    printf("  Simulating interrupt reception (since socket flow needs bidirectional setup)...\n");
-    
-    /* For now, simulate that we received the interrupt by calling trigger_interrupt directly */
-    printf("  NOTE: In full implementation, interrupt would be received via socket from Python model\n");
-    printf("  Simulating received interrupt from model...\n");
-    
-    if (trigger_interrupt(1, 0x42) == 0) {
-        printf("  Interrupt forwarded to driver layer\n");
-    } else {
-        printf("  Failed to forward interrupt to driver layer\n");
-    }
-    
+
     /* Wait for Python process to complete */
     int status;
     waitpid(model_pid, &status, 0);
@@ -323,15 +247,8 @@ TEST(model_to_driver_interrupt_flow) {
     }
     
     /* Verify interrupt details */
-    if (received_device_id != 1) {
-        printf("  ERROR: Wrong device ID received: expected=1, actual=%d\n", received_device_id);
-        unregister_device(1);
-        interface_layer_deinit();
-        return -1;
-    }
-    
-    if (received_interrupt_id != 0x42) {
-        printf("  ERROR: Wrong interrupt ID received: expected=0x42, actual=0x%x\n", received_interrupt_id);
+    if (received_interrupt_id != 10) {
+        printf("  ERROR: Wrong interrupt ID received: expected=10, actual=%d\n", received_interrupt_id);
         unregister_device(1);
         interface_layer_deinit();
         return -1;
@@ -959,6 +876,7 @@ TEST(memset_rep_stos_support) {
 int main(void) {
     printf("NewICD3 Interface Layer Unit Tests\n");
     printf("==================================\n\n");
+
     RUN_TEST(interface_layer_init_deinit);
     RUN_TEST(device_registration);
     RUN_TEST(register_access);
@@ -972,8 +890,6 @@ int main(void) {
     RUN_TEST(bare_metal_mixed_access);
     RUN_TEST(uart_device_test);
     RUN_TEST(memset_rep_stos_support);
-    RUN_TEST(interrupt_handling);
-    RUN_TEST(model_interrupt_handling);
     RUN_TEST(model_to_driver_interrupt_flow);
     RUN_TEST(protocol_message);
     

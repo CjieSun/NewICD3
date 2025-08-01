@@ -76,13 +76,11 @@ uint32_t read_register(uint32_t address, uint32_t size);
 int write_register(uint32_t address, uint32_t data, uint32_t size);
 
 /* Interrupt handling */
-typedef void (*interrupt_handler_t)(uint32_t device_id, uint32_t interrupt_id);
+typedef void (*interrupt_handler_t)(uint32_t interrupt_id);
 int register_interrupt_handler(uint32_t device_id, interrupt_handler_t handler);
-int trigger_interrupt(uint32_t device_id, uint32_t interrupt_id);
 
 /* Socket communication */
 int send_message_to_model(const protocol_message_t *message, protocol_message_t *response);
-int handle_model_interrupts(void);
 
 /* Signal-based interrupt support */
 pid_t get_interface_process_pid(void);

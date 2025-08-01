@@ -222,21 +222,6 @@ class ModelInterface:
         except Exception as e:
             logger.error(f"Failed to trigger interrupt via signal: {e}")
                     
-    def simulate_device_activity(self):
-        """Simulate device activity that triggers interrupts"""
-        if not self.running:
-            return
-            
-        # Simulate some device events that would trigger interrupts
-        time.sleep(2)  # Wait a bit after startup
-        
-        if self.running:
-            self.trigger_interrupt_to_driver(0x01)  # Data ready interrupt
-            
-        time.sleep(3)
-        if self.running:
-            self.trigger_interrupt_to_driver(0x02)  # Status change interrupt
-            
     def handle_client(self, client_socket):
         """Handle communication with a client - one message per connection"""
         try:
@@ -313,13 +298,9 @@ class ModelInterface:
 def main():
     """Main function for testing"""
     model = ModelInterface(1)
-    
-    # Start device activity simulation in background
-    activity_thread = threading.Thread(target=model.simulate_device_activity, daemon=True)
-    
+
     try:
         logger.info("Starting model interface...")
-        activity_thread.start()
         model.start()
     except KeyboardInterrupt:
         print("\nShutting down model interface...")
