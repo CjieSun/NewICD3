@@ -50,10 +50,11 @@ TEST_OBJS = $(BUILD_DIR)/test_interface_layer.o
 # Targets
 MAIN_TARGET = $(BIN_DIR)/icd3_simulator
 TEST_TARGET = $(BIN_DIR)/test_interface_layer
+DEMO_TARGET = $(BIN_DIR)/demo_memset
 
 .PHONY: all clean test directories format check-format help
 
-all: directories $(MAIN_TARGET) $(TEST_TARGET)
+all: directories $(MAIN_TARGET) $(TEST_TARGET) $(DEMO_TARGET)
 
 directories:
 	@mkdir -p $(BUILD_DIR) $(BIN_DIR)
@@ -65,6 +66,10 @@ $(MAIN_TARGET): $(INTERFACE_OBJS) $(DRIVER_OBJS) $(APP_OBJS)
 # Test executable
 $(TEST_TARGET): $(INTERFACE_OBJS) $(TEST_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
+
+# Demo executable
+$(DEMO_TARGET): demo_memset.c $(INTERFACE_OBJS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $^
 
 # Object files
 $(BUILD_DIR)/driver_interface.o: $(INTERFACE_SRCS)
@@ -110,6 +115,16 @@ test: $(TEST_TARGET)
 	@echo "All tests completed successfully!"
 	@echo "=========================================="
 
+# memset demonstration
+demo: $(DEMO_TARGET)
+	@echo "=========================================="
+	@echo "Running NewICD3 memset Support Demo"
+	@echo "=========================================="
+	@$(DEMO_TARGET)
+	@echo "=========================================="
+	@echo "memset demonstration completed!"
+	@echo "=========================================="
+
 integration-test: $(MAIN_TARGET)
 	@echo "=========================================="
 	@echo "Running NewICD3 Integration Tests"
@@ -131,6 +146,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all              - Build all targets (default)"
 	@echo "  test             - Run unit tests with enhanced output"
+	@echo "  demo             - Run memset support demonstration"
 	@echo "  integration-test - Run integration tests"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  format           - Format source code with clang-format"
@@ -147,6 +163,7 @@ help:
 	@echo "Build artifacts:"
 	@echo "  $(MAIN_TARGET) - Main simulator executable"
 	@echo "  $(TEST_TARGET)  - Test suite executable"
+	@echo "  $(DEMO_TARGET)    - memset demonstration"
 	@echo ""
 	@echo "Prerequisites:"
 	@echo "  - GCC compiler"
