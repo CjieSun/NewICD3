@@ -52,7 +52,7 @@ MAIN_TARGET = $(BIN_DIR)/icd3_simulator
 TEST_TARGET = $(BIN_DIR)/test_interface_layer
 DEMO_TARGET = $(BIN_DIR)/demo_memset
 
-.PHONY: all clean test directories format check-format help
+.PHONY: all clean test demo directories format check-format help
 
 all: directories $(MAIN_TARGET) $(TEST_TARGET) $(DEMO_TARGET)
 
