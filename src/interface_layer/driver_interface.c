@@ -24,6 +24,12 @@ static int device_count = 0;
 static int server_socket = -1;
 static interrupt_handler_t interrupt_handlers[MAX_DEVICES];
 
+/* Forward declarations for segv_handler helper functions */
+static int handle_rep_stos_instruction(uintptr_t fault_addr, ucontext_t *uctx, uint8_t *instruction, int inst_length);
+static int handle_avx_instruction(uintptr_t fault_addr, ucontext_t *uctx, uint8_t *instruction, int inst_length);
+static void handle_standard_instruction(uintptr_t fault_addr, ucontext_t *uctx, uint8_t *instruction, int inst_length);
+static int find_target_device(uintptr_t fault_addr);
+
 /* Function to calculate x86-64 instruction length */
 static int get_instruction_length(uint8_t *instruction) {
     uint8_t *inst_ptr = instruction;
@@ -174,6 +180,213 @@ static int get_destination_register_from_modrm(uint8_t *instruction, int is_two_
     }
 }
 
+/* Helper function to handle REP STOS instructions */
+static int handle_rep_stos_instruction(uintptr_t fault_addr, ucontext_t *uctx, uint8_t *instruction, int inst_length) {
+    uint8_t *rep_inst_ptr = instruction;
+    int stos_size = 1; /* Default to byte size */
+    
+    /* Check for REP prefix (0xF3) */
+    if (*rep_inst_ptr != 0xF3) {
+        return 0; /* Not a REP STOS instruction */
+    }
+    
+    rep_inst_ptr++;
+    
+    /* Check for 16-bit operand size prefix before STOS */
+    if (*rep_inst_ptr == 0x66) {
+        stos_size = 2; /* 16-bit word */
+        rep_inst_ptr++;
+    }
+    
+    /* Check for STOS opcodes */
+    if (*rep_inst_ptr == 0xAA) {
+        /* REP STOSB - repeat store byte */
+        stos_size = 1;
+        LOG_DEBUG("Detected REP STOSB instruction (bulk byte write)");
+    } else if (*rep_inst_ptr == 0xAB) {
+        /* REP STOSD or REP STOSW - repeat store dword/word */
+        if (stos_size != 2) {
+            stos_size = 4; /* Default to 32-bit dword if no 0x66 prefix */
+        }
+        LOG_DEBUG("Detected REP STOS%c instruction (bulk %d-byte write)", 
+               stos_size == 2 ? 'W' : 'D', stos_size);
+    } else {
+        return 0; /* Not a STOS instruction */
+    }
+    
+    /* Extract registers for REP STOS operation */
+    uint64_t count = uctx->uc_mcontext.gregs[REG_RCX];     /* Count of operations */
+    uint64_t dest_addr = uctx->uc_mcontext.gregs[REG_RDI]; /* Destination address */
+    uint64_t value = uctx->uc_mcontext.gregs[REG_RAX];     /* Value to store */
+    
+    LOG_DEBUG("REP STOS: count=%lu, dest=0x%lx, value=0x%lx, size=%d",
+           count, dest_addr, value, stos_size);
+    
+    /* Find which device this address range belongs to */
+    int device_index = find_target_device(dest_addr);
+    if (device_index == -1) {
+        LOG_ERROR("REP STOS targeting unmapped address 0x%lx", dest_addr);
+        exit(1);
+    }
+    
+    uint32_t device_base = devices[device_index].base_address;
+    uint32_t device_size = devices[device_index].size;
+    
+    LOG_INFO("REP STOS operation targeting device %d (base=0x%x, size=0x%x)",
+           devices[device_index].device_id, device_base, device_size);
+    
+    /* Ensure the entire operation stays within device bounds */
+    uint64_t end_addr = dest_addr + (count * stos_size);
+    if (end_addr > device_base + device_size) {
+        LOG_WARN("REP STOS operation extends beyond device bounds, truncating");
+        count = (device_base + device_size - dest_addr) / stos_size;
+    }
+    
+    /* Perform bulk write operation */
+    LOG_INFO("Performing bulk write: %lu x %d-byte writes starting at 0x%lx",
+           count, stos_size, dest_addr);
+    
+    for (uint64_t j = 0; j < count; j++) {
+        uint32_t write_addr = (uint32_t)(dest_addr + j * stos_size);
+        uint64_t write_val = value;
+        
+        /* Mask value according to size */
+        if (stos_size == 1) {
+            write_val &= 0xFF;
+        } else if (stos_size == 2) {
+            write_val &= 0xFFFF;
+        } else {
+            write_val &= 0xFFFFFFFF;
+        }
+        
+        /* Send write command to device model */
+        protocol_message_t message = {0};
+        message.device_id = devices[device_index].device_id;
+        message.command = CMD_WRITE;
+        message.address = write_addr;
+        message.length = stos_size;
+        memcpy(message.data, &write_val, stos_size);
+        
+        protocol_message_t response = {0};
+        if (send_message_to_model(&message, &response) != 0) {
+            LOG_ERROR("Failed to send write command for REP STOS operation");
+            break;
+        }
+        
+        if (response.result != RESULT_SUCCESS) {
+            LOG_ERROR("Device model returned error for REP STOS write");
+            break;
+        }
+    }
+    
+    /* Update CPU registers to reflect completed REP STOS operation */
+    uctx->uc_mcontext.gregs[REG_RCX] = 0; /* Count decrements to 0 */
+    uctx->uc_mcontext.gregs[REG_RDI] = dest_addr + (count * stos_size); /* Final destination */
+    
+    LOG_DEBUG("REP STOS completed: RCX=0, RDI=0x%lx", 
+           (uint64_t)uctx->uc_mcontext.gregs[REG_RDI]);
+    
+    /* Skip the entire REP STOS instruction */
+    uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
+    uintptr_t rip = (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP] - inst_length;
+    LOG_DEBUG("Advanced RIP by %d bytes (from 0x%lx to 0x%lx)",
+           inst_length, rip, rip + inst_length);
+    
+    return 1; /* REP STOS handled */
+}
+
+/* Helper function to handle AVX instructions */
+static int handle_avx_instruction(uintptr_t fault_addr, ucontext_t *uctx, uint8_t *instruction, int inst_length) {
+    /* Check for AVX/SIMD memset patterns (VEX prefix 0xC5) */
+    if (*instruction != 0xC5) {
+        return 0; /* Not an AVX instruction */
+    }
+    
+    /* This is a VEX-encoded AVX instruction, common in optimized memset */
+    LOG_DEBUG("Detected VEX-encoded AVX instruction (likely optimized memset)");
+    
+    /* Try to determine the operation size from the second VEX byte */
+    uint8_t vex_byte2 = instruction[1];
+    (void)vex_byte2; /* Mark as used to avoid compiler warning */
+    
+    /* For now, treat AVX memset as a conservative bulk operation */
+    /* We'll use heuristics: if RCX contains a reasonable count, use it */
+    uint64_t rcx_val = uctx->uc_mcontext.gregs[REG_RCX];
+    uint64_t rdi_val = uctx->uc_mcontext.gregs[REG_RDI];
+    
+    /* Find target device */
+    int device_index = find_target_device(fault_addr);
+    if (device_index == -1) {
+        LOG_DEBUG("AVX instruction not targeting device memory, treating as regular instruction");
+        return 0;
+    }
+    
+    uint32_t device_base = devices[device_index].base_address;
+    uint32_t device_size = devices[device_index].size;
+    
+    /* If RDI points to our device memory and RCX looks like a count, handle as bulk write */
+    if (rcx_val > 0 && rcx_val <= 1024 && rdi_val == fault_addr) {
+        /* Looks like a memset pattern: RDI=destination, RCX=count */
+        LOG_INFO("AVX memset pattern detected: dest=0x%lx, count=%lu", rdi_val, rcx_val);
+        
+        /* Perform conservative byte-wise memset simulation */
+        uint64_t value = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Use AL for value */
+        
+        LOG_DEBUG("Simulating AVX memset: %lu bytes of 0x%02lx at 0x%lx", 
+               rcx_val, value, rdi_val);
+        
+        for (uint64_t j = 0; j < rcx_val; j++) {
+            uint32_t write_addr = (uint32_t)(rdi_val + j);
+            
+            /* Ensure we stay within device bounds */
+            if (write_addr >= device_base + device_size) {
+                break;
+            }
+            
+            protocol_message_t message = {0};
+            message.device_id = devices[device_index].device_id;
+            message.command = CMD_WRITE;
+            message.address = write_addr;
+            message.length = 1;
+            uint8_t write_val = (uint8_t)value;
+            memcpy(message.data, &write_val, 1);
+            
+            protocol_message_t response = {0};
+            if (send_message_to_model(&message, &response) != 0) {
+                LOG_ERROR("Failed to send AVX memset write");
+                break;
+            }
+        }
+        
+        /* Update registers to simulate completion */
+        uctx->uc_mcontext.gregs[REG_RCX] = 0;
+        uctx->uc_mcontext.gregs[REG_RDI] = rdi_val + rcx_val;
+        
+        /* Skip the AVX instruction (conservative approach) */
+        uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
+        LOG_DEBUG("AVX memset simulation completed, advanced RIP by %d bytes", inst_length);
+        
+        return 1; /* AVX handled */
+    } else {
+        /* AVX instruction but doesn't look like memset, fall back to single operation */
+        LOG_DEBUG("AVX instruction targeting device but not memset pattern, treating as single write");
+        return 0;
+    }
+}
+
+/* Helper function to find which device contains the given address */
+static int find_target_device(uintptr_t fault_addr) {
+    for (int i = 0; i < device_count; i++) {
+        uint32_t device_base = devices[i].base_address;
+        uint32_t device_size = devices[i].size;
+        
+        if (fault_addr >= device_base && fault_addr < device_base + device_size) {
+            return i;
+        }
+    }
+    return -1; /* Device not found */
+}
+
 /* Signal handler for memory access violations */
 static void segv_handler(int sig, siginfo_t *info, void *context) {
     (void)sig; /* Mark parameter as used */
@@ -186,225 +399,33 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     
     /* Calculate instruction length */
     int inst_length = get_instruction_length(instruction);
-    printf("Instruction at RIP 0x%lx, length: %d bytes\n", rip, inst_length);
+    LOG_DEBUG("Instruction at RIP 0x%lx, length: %d bytes", rip, inst_length);
     
-    /* Print the instruction bytes in hex */
-    printf("Instruction bytes: ");
-    for (int i = 0; i < inst_length && i < 15; i++) {  /* Limit to 15 bytes max for safety */
-        printf("%02X ", instruction[i]);
-    }
-    printf("\n");
-    
-    /* Check for REP STOS instructions first (memset-style bulk operations) */
-    uint8_t *rep_inst_ptr = instruction;
-    int is_rep_stos = 0;
-    int stos_size = 1; /* Default to byte size */
-    
-    /* Check for REP prefix (0xF3) */
-    if (*rep_inst_ptr == 0xF3) {
-        rep_inst_ptr++;
-        
-        /* Check for 16-bit operand size prefix before STOS */
-        if (*rep_inst_ptr == 0x66) {
-            stos_size = 2; /* 16-bit word */
-            rep_inst_ptr++;
+    /* Print the instruction bytes in hex for debugging */
+    if (log_get_level() <= LOG_LEVEL_DEBUG) {
+        printf("Instruction bytes: ");
+        for (int i = 0; i < inst_length && i < 15; i++) {  /* Limit to 15 bytes max for safety */
+            printf("%02X ", instruction[i]);
         }
-        
-        /* Check for STOS opcodes */
-        if (*rep_inst_ptr == 0xAA) {
-            /* REP STOSB - repeat store byte */
-            is_rep_stos = 1;
-            stos_size = 1;
-            printf("Detected REP STOSB instruction (bulk byte write)\n");
-        } else if (*rep_inst_ptr == 0xAB) {
-            /* REP STOSD or REP STOSW - repeat store dword/word */
-            is_rep_stos = 1;
-            if (stos_size != 2) {
-                stos_size = 4; /* Default to 32-bit dword if no 0x66 prefix */
-            }
-            printf("Detected REP STOS%c instruction (bulk %d-byte write)\n", 
-                   stos_size == 2 ? 'W' : 'D', stos_size);
-        }
+        printf("\n");
     }
     
-    /* Check for AVX/SIMD memset patterns (VEX prefix 0xC5) */
-    uint8_t *avx_inst_ptr = instruction;
-    int is_avx_memset = 0;
-    
-    if (*avx_inst_ptr == 0xC5) {
-        /* This is a VEX-encoded AVX instruction, common in optimized memset */
-        printf("Detected VEX-encoded AVX instruction (likely optimized memset)\n");
-        
-        /* For AVX memset, we'll simulate it as a series of writes based on the fault address */
-        /* We can't easily decode the full AVX instruction, but we can infer the operation */
-        /* from the context and handle it as a bulk write operation */
-        
-        /* Try to determine the operation size from the second VEX byte */
-        avx_inst_ptr++; /* Skip 0xC5 */
-        uint8_t vex_byte2 = *avx_inst_ptr;
-        (void)vex_byte2; /* Mark as used to avoid compiler warning */
-        
-        /* For now, treat AVX memset as a conservative bulk operation */
-        /* We'll use heuristics: if RCX contains a reasonable count, use it */
-        uint64_t rcx_val = uctx->uc_mcontext.gregs[REG_RCX];
-        uint64_t rdi_val = uctx->uc_mcontext.gregs[REG_RDI];
-        
-        /* If RDI points to our device memory and RCX looks like a count, handle as bulk write */
-        for (int i = 0; i < device_count; i++) {
-            uint32_t device_base = devices[i].base_address;
-            uint32_t device_size = devices[i].size;
-            
-            if (fault_addr >= device_base && fault_addr < device_base + device_size) {
-                /* This AVX instruction is targeting our device memory */
-                if (rcx_val > 0 && rcx_val <= 1024 && rdi_val == fault_addr) {
-                    /* Looks like a memset pattern: RDI=destination, RCX=count */
-                    is_avx_memset = 1;
-                    printf("AVX memset pattern detected: dest=0x%lx, count=%lu\n", rdi_val, rcx_val);
-                    
-                    /* Perform conservative byte-wise memset simulation */
-                    uint64_t value = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Use AL for value */
-                    
-                    printf("Simulating AVX memset: %lu bytes of 0x%02lx at 0x%lx\n", 
-                           rcx_val, value, rdi_val);
-                    
-                    for (uint64_t j = 0; j < rcx_val; j++) {
-                        uint32_t write_addr = (uint32_t)(rdi_val + j);
-                        
-                        /* Ensure we stay within device bounds */
-                        if (write_addr >= device_base + device_size) {
-                            break;
-                        }
-                        
-                        protocol_message_t message = {0};
-                        message.device_id = devices[i].device_id;
-                        message.command = CMD_WRITE;
-                        message.address = write_addr;
-                        message.length = 1;
-                        uint8_t write_val = (uint8_t)value;
-                        memcpy(message.data, &write_val, 1);
-                        
-                        protocol_message_t response = {0};
-                        if (send_message_to_model(&message, &response) != 0) {
-                            printf("Failed to send AVX memset write\n");
-                            break;
-                        }
-                    }
-                    
-                    /* Update registers to simulate completion */
-                    uctx->uc_mcontext.gregs[REG_RCX] = 0;
-                    uctx->uc_mcontext.gregs[REG_RDI] = rdi_val + rcx_val;
-                    
-                    /* Skip the AVX instruction (conservative approach) */
-                    uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
-                    printf("AVX memset simulation completed, advanced RIP by %d bytes\n", inst_length);
-                    
-                    return;
-                } else {
-                    /* AVX instruction but doesn't look like memset, fall back to single operation */
-                    printf("AVX instruction targeting device but not memset pattern, treating as single write\n");
-                    is_avx_memset = 0;
-                }
-                break;
-            }
-        }
-        
-        if (!is_avx_memset) {
-            /* AVX instruction but not targeting our device or not memset pattern */
-            printf("AVX instruction not targeting device memory or not memset, treating as regular instruction\n");
-        }
+    /* Try to handle as REP STOS instruction first */
+    if (handle_rep_stos_instruction(fault_addr, uctx, instruction, inst_length)) {
+        return; /* REP STOS handled successfully */
     }
     
-    /* Handle REP STOS or AVX memset instructions */
-    if (is_rep_stos || is_avx_memset) {
-        if (is_avx_memset) {
-            /* AVX memset was already handled above */
-            return;
-        }
-        
-        /* Handle REP STOS instructions */
-        /* Extract registers for REP STOS operation */
-        uint64_t count = uctx->uc_mcontext.gregs[REG_RCX];     /* Count of operations */
-        uint64_t dest_addr = uctx->uc_mcontext.gregs[REG_RDI]; /* Destination address */
-        uint64_t value = uctx->uc_mcontext.gregs[REG_RAX];     /* Value to store */
-        
-        printf("REP STOS: count=%lu, dest=0x%lx, value=0x%lx, size=%d\n",
-               count, dest_addr, value, stos_size);
-        
-        /* Find which device this address range belongs to */
-        for (int i = 0; i < device_count; i++) {
-            uint32_t device_base = devices[i].base_address;
-            uint32_t device_size = devices[i].size;
-            
-            /* Check if the start address falls within this device's range */
-            if (dest_addr >= device_base && dest_addr < device_base + device_size) {
-                printf("REP STOS operation targeting device %d (base=0x%x, size=0x%x)\n",
-                       devices[i].device_id, device_base, device_size);
-                
-                /* Ensure the entire operation stays within device bounds */
-                uint64_t end_addr = dest_addr + (count * stos_size);
-                if (end_addr > device_base + device_size) {
-                    printf("WARNING: REP STOS operation extends beyond device bounds, truncating\n");
-                    count = (device_base + device_size - dest_addr) / stos_size;
-                }
-                
-                /* Perform bulk write operation */
-                printf("Performing bulk write: %lu x %d-byte writes starting at 0x%lx\n",
-                       count, stos_size, dest_addr);
-                
-                for (uint64_t j = 0; j < count; j++) {
-                    uint32_t write_addr = (uint32_t)(dest_addr + j * stos_size);
-                    uint64_t write_val = value;
-                    
-                    /* Mask value according to size */
-                    if (stos_size == 1) {
-                        write_val &= 0xFF;
-                    } else if (stos_size == 2) {
-                        write_val &= 0xFFFF;
-                    } else {
-                        write_val &= 0xFFFFFFFF;
-                    }
-                    
-                    /* Send write command to device model */
-                    protocol_message_t message = {0};
-                    message.device_id = devices[i].device_id;
-                    message.command = CMD_WRITE;
-                    message.address = write_addr;
-                    message.length = stos_size;
-                    memcpy(message.data, &write_val, stos_size);
-                    
-                    protocol_message_t response = {0};
-                    if (send_message_to_model(&message, &response) != 0) {
-                        printf("Failed to send write command for REP STOS operation\n");
-                        break;
-                    }
-                    
-                    if (response.result != RESULT_SUCCESS) {
-                        printf("Device model returned error for REP STOS write\n");
-                        break;
-                    }
-                }
-                
-                /* Update CPU registers to reflect completed REP STOS operation */
-                uctx->uc_mcontext.gregs[REG_RCX] = 0; /* Count decrements to 0 */
-                uctx->uc_mcontext.gregs[REG_RDI] = dest_addr + (count * stos_size); /* Final destination */
-                
-                printf("REP STOS completed: RCX=0, RDI=0x%lx\n", 
-                       (uint64_t)uctx->uc_mcontext.gregs[REG_RDI]);
-                
-                /* Skip the entire REP STOS instruction */
-                uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
-                printf("Advanced RIP by %d bytes (from 0x%lx to 0x%lx)\n",
-                       inst_length, rip, rip + inst_length);
-                
-                return; /* REP STOS handling complete */
-            }
-        }
-        
-        /* If we get here, the address is not in any registered device */
-        printf("REP STOS targeting unmapped address 0x%lx\n", dest_addr);
-        exit(1);
+    /* Try to handle as AVX instruction */
+    if (handle_avx_instruction(fault_addr, uctx, instruction, inst_length)) {
+        return; /* AVX instruction handled successfully */
     }
     
+    /* Handle as standard instruction */
+    handle_standard_instruction(fault_addr, uctx, instruction, inst_length);
+}
+
+/* Helper function to handle standard memory access instructions */
+static void handle_standard_instruction(uintptr_t fault_addr, ucontext_t *uctx, uint8_t *instruction, int inst_length) {
     /* Determine if it's a read or write instruction and access size */
     int is_write = 0;
     uint32_t access_size = 4; /* Default to 4 bytes */
@@ -450,28 +471,28 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             case 0xB6: /* movzbl [mem], r32 - zero-extend 8-bit read */
                 is_write = 0;
                 access_size = 1;
-                printf("Detected MOVZBL (0x0F 0xB6) 8-bit zero-extend READ instruction at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected MOVZBL (0x0F 0xB6) 8-bit zero-extend read instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
             case 0xB7: /* movzwl [mem], r32 - zero-extend 16-bit read */
                 is_write = 0;
                 access_size = 2;
-                printf("Detected MOVZWL (0x0F 0xB7) 16-bit zero-extend READ instruction at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
             case 0xBE: /* movsbl [mem], r32 - sign-extend 8-bit read */
                 is_write = 0;
                 access_size = 1;
-                printf("Detected MOVSBL (0x0F 0xBE) 8-bit sign-extend READ instruction at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
             case 0xBF: /* movswl [mem], r32 - sign-extend 16-bit read */
                 is_write = 0;
                 access_size = 2;
-                printf("Detected MOVSWL (0x0F 0xBF) 16-bit sign-extend READ instruction at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
             default:
                 /* Unknown two-byte instruction - treat as 32-bit read for safety */
                 is_write = 0;
                 access_size = 4;
-                printf("Unknown two-byte instruction 0x0F 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", second_opcode, rip);
+                LOG_WARN("Unknown two-byte instruction 0x0F 0x%02X at RIP 0x%lx, treating as 32-bit READ", second_opcode, (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
         }
     } else {
@@ -480,24 +501,24 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             case 0x8A: /* mov r8, [mem] - 8-bit read */
                 is_write = 0;
                 access_size = 1;
-                printf("Detected 8-bit READ instruction (0x8A) at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
             case 0x8B: /* mov r32/r16, [mem] - 32/16-bit read */
                 is_write = 0;
                 access_size = has_66_prefix ? 2 : 4;
-                printf("Detected %d-bit READ instruction (0x8B) at RIP 0x%lx\n", access_size * 8, rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", access_size * 8, (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
             case 0x88: /* mov [mem], r8 - 8-bit write */
                 is_write = 1;
                 access_size = 1;
-                printf("Detected 8-bit WRITE instruction (0x88) at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 /* Extract 8-bit data from low byte of register */
                 write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* Simplified: assume AL register */
                 break;
             case 0x89: /* mov [mem], r32/r16 - 32/16-bit write */
                 is_write = 1;
                 access_size = has_66_prefix ? 2 : 4;
-                printf("Detected %d-bit WRITE instruction (0x89) at RIP 0x%lx\n", access_size * 8, rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", access_size * 8, (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 /* Extract data from register */
                 if (has_66_prefix) {
                     write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFF; /* 16-bit */
@@ -508,7 +529,7 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             case 0xC6: /* mov [mem], imm8 - 8-bit immediate write */
                 is_write = 1;
                 access_size = 1;
-                printf("Detected 8-bit immediate WRITE instruction (0xC6) at RIP 0x%lx\n", rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 /* Extract immediate value from instruction stream */
                 uint8_t *imm_ptr = instruction + inst_length - 1; /* Last byte is immediate */
                 write_data = *imm_ptr;
@@ -516,7 +537,7 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
             case 0xC7: /* mov [mem], imm32/imm16 - 32/16-bit immediate write */
                 is_write = 1;
                 access_size = has_66_prefix ? 2 : 4;
-                printf("Detected %d-bit immediate WRITE instruction (0xC7) at RIP 0x%lx\n", access_size * 8, rip);
+                LOG_DEBUG("Detected %s instruction at RIP 0x%lx", access_size * 8, (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 /* Extract immediate value from instruction stream */
                 if (has_66_prefix) {
                     uint8_t *imm_ptr = instruction + inst_length - 2; /* Last 2 bytes are immediate */
@@ -530,81 +551,79 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
                 /* Unknown instruction - treat as 32-bit read for safety */
                 is_write = 0;
                 access_size = 4;
-                printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", first_opcode, rip);
+                LOG_WARN("Unknown instruction 0x%02X at RIP 0x%lx, treating as 32-bit READ", first_opcode, (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP]);
                 break;
         }
     }
     
     /* Find which device this address belongs to by comparing with device base addresses */
-    printf("Looking for device containing fault address 0x%lx\n", fault_addr);
-    printf("Current device count: %d\n", device_count);
+    LOG_DEBUG("Looking for device containing fault address 0x%lx", fault_addr);
+    LOG_DEBUG("Current device count: %d", device_count);
     
-    for (int i = 0; i < device_count; i++) {
-        uint32_t device_base = devices[i].base_address;
-        uint32_t device_size = devices[i].size;
-        printf("Device %d: base_address=0x%x, size=0x%x, range=0x%x-0x%x\n", 
-               devices[i].device_id, device_base, device_size, device_base, device_base + device_size - 1);
-        
-        /* Check if fault address falls within this device's address range */
-        if (fault_addr >= device_base && fault_addr < device_base + device_size) {
-            printf("Memory access violation at device %d, address 0x%lx (%s, %d bytes)\n", 
-                   devices[i].device_id, fault_addr, is_write ? "WRITE" : "READ", access_size);
-            
-            /* Handle the actual read/write operation by sending it to the device model */
-            protocol_message_t message = {0};
-            message.device_id = devices[i].device_id;
-            message.command = is_write ? CMD_WRITE : CMD_READ;
-            message.address = (uint32_t)fault_addr;
-            message.length = access_size;
-            
-            if (is_write) {
-                /* Copy write data to message based on access size */
-                memcpy(message.data, &write_data, access_size);
-                printf("Writing %d-byte value: 0x%lx\n", access_size, write_data);
-            }
-            
-            protocol_message_t response = {0};
-            if (send_message_to_model(&message, &response) == 0) {
-                if (!is_write && response.result == RESULT_SUCCESS) {
-                    /* For reads, backfill the destination register with the read data */
-                    uint64_t read_data = 0;
-                    memcpy(&read_data, response.data, access_size);
-                    printf("Read completed, %d-byte data: 0x%lx\n", access_size, read_data);
-                    
-                    /* Determine destination register from ModR/M byte and update it */
-                    int dest_reg = get_destination_register_from_modrm(instruction, is_two_byte_opcode, 
-                                                                     is_two_byte_opcode ? second_opcode : first_opcode);
-                    
-                    /* Update the destination register based on access size */
-                    if (access_size == 1) {
-                        /* 8-bit read: only update low byte, preserve high bits */
-                        uctx->uc_mcontext.gregs[dest_reg] = (uctx->uc_mcontext.gregs[dest_reg] & 0xFFFFFFFFFFFFFF00ULL) | (read_data & 0xFF);
-                    } else if (access_size == 2) {
-                        /* 16-bit read: only update low 16 bits, preserve high bits */
-                        uctx->uc_mcontext.gregs[dest_reg] = (uctx->uc_mcontext.gregs[dest_reg] & 0xFFFFFFFFFFFF0000ULL) | (read_data & 0xFFFF);
-                    } else if (access_size == 4) {
-                        /* 32-bit read: clear high 32 bits, set low 32 bits (x86-64 convention) */
-                        uctx->uc_mcontext.gregs[dest_reg] = read_data & 0xFFFFFFFF;
-                    } else {
-                        /* 64-bit read: set entire register */
-                        uctx->uc_mcontext.gregs[dest_reg] = read_data;
-                    }
-                    
-                    printf("Updated register %d with read data: 0x%llx\n", dest_reg, (unsigned long long)uctx->uc_mcontext.gregs[dest_reg]);
-                }
-                
-                /* Advance RIP to skip the faulting instruction using calculated length */
-                printf("Advancing RIP by %d bytes (from 0x%lx to 0x%lx)\n", 
-                       inst_length, rip, rip + inst_length);
-                uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
-            }
-            return;
-        }
+    int device_index = find_target_device(fault_addr);
+    if (device_index == -1) {
+        /* If we get here, it's an actual segmentation fault */
+        LOG_ERROR("Actual segmentation fault at address %p", (void*)fault_addr);
+        exit(1);
     }
     
-    /* If we get here, it's an actual segmentation fault */
-    printf("Actual segmentation fault at address %p\n", info->si_addr);
-    exit(1);
+    uint32_t device_base = devices[device_index].base_address;
+    uint32_t device_size = devices[device_index].size;
+    LOG_DEBUG("Device %d: base_address=0x%x, size=0x%x, range=0x%x-0x%x", 
+           devices[device_index].device_id, device_base, device_size, device_base, device_base + device_size - 1);
+    
+    LOG_INFO("Memory access violation at device %d, address 0x%lx (%s, %d bytes)", 
+           devices[device_index].device_id, fault_addr, is_write ? "WRITE" : "READ", access_size);
+    
+    /* Handle the actual read/write operation by sending it to the device model */
+    protocol_message_t message = {0};
+    message.device_id = devices[device_index].device_id;
+    message.command = is_write ? CMD_WRITE : CMD_READ;
+    message.address = (uint32_t)fault_addr;
+    message.length = access_size;
+    
+    if (is_write) {
+        /* Copy write data to message based on access size */
+        memcpy(message.data, &write_data, access_size);
+        LOG_DEBUG("Writing %d-byte value: 0x%lx", access_size, write_data);
+    }
+    
+    protocol_message_t response = {0};
+    if (send_message_to_model(&message, &response) == 0) {
+        if (!is_write && response.result == RESULT_SUCCESS) {
+            /* For reads, backfill the destination register with the read data */
+            uint64_t read_data = 0;
+            memcpy(&read_data, response.data, access_size);
+            LOG_DEBUG("Read completed, %d-byte data: 0x%lx", access_size, read_data);
+            
+            /* Determine destination register from ModR/M byte and update it */
+            int dest_reg = get_destination_register_from_modrm(instruction, is_two_byte_opcode, 
+                                                             is_two_byte_opcode ? second_opcode : first_opcode);
+            
+            /* Update the destination register based on access size */
+            if (access_size == 1) {
+                /* 8-bit read: only update low byte, preserve high bits */
+                uctx->uc_mcontext.gregs[dest_reg] = (uctx->uc_mcontext.gregs[dest_reg] & 0xFFFFFFFFFFFFFF00ULL) | (read_data & 0xFF);
+            } else if (access_size == 2) {
+                /* 16-bit read: only update low 16 bits, preserve high bits */
+                uctx->uc_mcontext.gregs[dest_reg] = (uctx->uc_mcontext.gregs[dest_reg] & 0xFFFFFFFFFFFF0000ULL) | (read_data & 0xFFFF);
+            } else if (access_size == 4) {
+                /* 32-bit read: clear high 32 bits, set low 32 bits (x86-64 convention) */
+                uctx->uc_mcontext.gregs[dest_reg] = read_data & 0xFFFFFFFF;
+            } else {
+                /* 64-bit read: set entire register */
+                uctx->uc_mcontext.gregs[dest_reg] = read_data;
+            }
+            
+            LOG_DEBUG("Updated register %d with read data: 0x%llx", dest_reg, (unsigned long long)uctx->uc_mcontext.gregs[dest_reg]);
+        }
+        
+        /* Advance RIP to skip the faulting instruction using calculated length */
+        uintptr_t rip = (uintptr_t)uctx->uc_mcontext.gregs[REG_RIP];
+        LOG_DEBUG("Advancing RIP by %d bytes (from 0x%lx to 0x%lx)",
+               inst_length, rip, rip + inst_length);
+        uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
+    }
 }
 
 int interface_layer_init(void) {
@@ -646,7 +665,7 @@ int interface_layer_init(void) {
         return -1;
     }
     
-    printf("Driver interface initialized successfully\n");
+    LOG_INFO("Driver interface initialized successfully");
     return 0;
 }
 
@@ -667,13 +686,13 @@ int interface_layer_deinit(void) {
     }
     
     device_count = 0;
-    printf("Driver interface deinitialized\n");
+    LOG_INFO("Driver interface deinitialized");
     return 0;
 }
 
 int register_device(uint32_t device_id, uint32_t base_address, uint32_t size) {
     if (device_count >= MAX_DEVICES) {
-        printf("Maximum number of devices reached\n");
+        LOG_ERROR("Maximum number of devices reached");
         return -1;
     }
     
@@ -690,7 +709,7 @@ int register_device(uint32_t device_id, uint32_t base_address, uint32_t size) {
     devices[device_count].mapped_memory = mapped_mem;
     devices[device_count].socket_fd = -1;
     
-    printf("Registered device %d at base address 0x%x, size %d bytes\n", 
+    LOG_INFO("Registered device %d at base address 0x%x, size %d bytes", 
            device_id, base_address, size);
     
     device_count++;
@@ -713,12 +732,12 @@ int unregister_device(uint32_t device_id) {
             }
             device_count--;
             
-            printf("Unregistered device %d\n", device_id);
+            LOG_INFO("Unregistered device %d", device_id);
             return 0;
         }
     }
     
-    printf("Device %d not found\n", device_id);
+    LOG_WARN("Device %d not found", device_id);
     return -1;
 }
 
@@ -741,7 +760,7 @@ uint32_t read_register(uint32_t address, uint32_t size) {
         }
     }
     
-    printf("Read from unmapped address 0x%x\n", address);
+    LOG_WARN("Read from unmapped address 0x%x", address);
     return 0;
 }
 
@@ -763,7 +782,7 @@ int write_register(uint32_t address, uint32_t data, uint32_t size) {
         }
     }
     
-    printf("Write to unmapped address 0x%x\n", address);
+    LOG_WARN("Write to unmapped address 0x%x", address);
     return -1;
 }
 
@@ -784,13 +803,13 @@ int trigger_interrupt(uint32_t device_id, uint32_t interrupt_id) {
 }
 
 int send_message_to_model(const protocol_message_t *message, protocol_message_t *response) {
-    printf("Sending to model: device_id=%d, cmd=%d, addr=0x%x, len=%d\n",
+    LOG_DEBUG("Sending to model: device_id=%d, cmd=%d, addr=0x%x, len=%d",
            message->device_id, message->command, message->address, message->length);
     
     /* Try to connect to Python model via socket */
     int model_socket = socket(AF_UNIX, SOCK_STREAM, 0);
     if (model_socket == -1) {
-        printf("Failed to create socket for model communication\n");
+        LOG_ERROR("Failed to create socket for model communication");
         return -1;
     }
     
@@ -803,12 +822,12 @@ int send_message_to_model(const protocol_message_t *message, protocol_message_t 
     int connect_result = connect(model_socket, (struct sockaddr*)&model_addr, sizeof(model_addr));
     if (connect_result == -1) {
         /* Model not available, fall back to simulation */
-        printf("Model not available (connect failed: %s), using simulation\n", strerror(errno));
+        LOG_DEBUG("Model not available (connect failed: %s), using simulation", strerror(errno));
         close(model_socket);
         goto simulation_fallback;
     }
     
-    printf("Connected to model successfully\n");
+    LOG_DEBUG("Connected to model successfully");
     
     /* Send message to model */
     ssize_t bytes_sent = send(model_socket, message, sizeof(protocol_message_t), 0);
