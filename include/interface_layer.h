@@ -84,6 +84,9 @@ int trigger_interrupt(uint32_t device_id, uint32_t interrupt_id);
 int send_message_to_model(const protocol_message_t *message, protocol_message_t *response);
 int handle_model_interrupts(void);
 
+/* Signal-based interrupt support */
+pid_t get_interface_process_pid(void);
+
 #ifdef __cplusplus
 }
 #endif
