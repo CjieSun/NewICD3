@@ -107,7 +107,7 @@ static int run_all_tests(void) {
     }
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused))) {
     printf("NewICD3 Universal IC Simulator\n");
     printf("==============================\n");
     

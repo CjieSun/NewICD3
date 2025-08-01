@@ -1,3 +1,23 @@
+/**
+ * @file interface_layer.h
+ * @brief NewICD3 Interface Layer - Driver Transparency Implementation
+ * 
+ * This header defines the interface layer API that provides driver transparency
+ * through memory protection and signal handling. The interface layer acts as
+ * a bridge between CMSIS-compliant drivers and Python device models.
+ * 
+ * Key Features:
+ * - Memory protection using mmap + PROT_NONE
+ * - SIGSEGV signal handling for register access interception
+ * - x86-64 instruction parsing for read/write detection
+ * - Socket-based communication with Python device models
+ * - Interrupt delivery from models to drivers
+ * 
+ * @author NewICD3 Team
+ * @version 1.0
+ * @date 2024
+ */
+
 #ifndef INTERFACE_LAYER_H
 #define INTERFACE_LAYER_H
 

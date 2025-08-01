@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "interface_layer.h"
 #include <stdio.h>
 #include <stdlib.h>

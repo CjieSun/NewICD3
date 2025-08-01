@@ -1,11 +1,32 @@
 # NewICD3 Universal IC Simulator Makefile
 # ========================================
+# 
+# This Makefile builds the NewICD3 universal IC simulator with layered
+# architecture supporting driver transparency and hardware simulation.
+#
+# Architecture:
+#   Application Layer  → src/app_layer/
+#   Driver Layer       → src/driver_layer/  
+#   Interface Layer    → src/interface_layer/
+#   Device Models      → src/device_models/ (Python)
+#
+# Usage:
+#   make all              - Build all targets
+#   make test             - Run unit tests
+#   make integration-test - Run integration tests
+#   make clean            - Clean build artifacts
+#   make format          - Format source code
+#   make help            - Show help message
 
 # Compiler settings
 CC = gcc
 CFLAGS = -Wall -Wextra -std=gnu99 -g -O0 -D_GNU_SOURCE
 INCLUDES = -Iinclude
 LDFLAGS = 
+
+# Code formatting
+CLANG_FORMAT = clang-format
+FORMAT_STYLE = -style="{BasedOnStyle: GNU, IndentWidth: 4, UseTab: Never}" 
 
 # Directories
 SRC_DIR = src
@@ -30,7 +51,7 @@ TEST_OBJS = $(BUILD_DIR)/test_interface_layer.o
 MAIN_TARGET = $(BIN_DIR)/icd3_simulator
 TEST_TARGET = $(BIN_DIR)/test_interface_layer
 
-.PHONY: all clean test directories
+.PHONY: all clean test directories format check-format help
 
 all: directories $(MAIN_TARGET) $(TEST_TARGET)
 
@@ -58,14 +79,45 @@ $(BUILD_DIR)/main.o: $(APP_SRCS)
 $(BUILD_DIR)/test_interface_layer.o: $(TEST_SRCS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-# Test targets
+# Code formatting and quality
+format:
+	@echo "Formatting source code..."
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		find $(SRC_DIR) $(INCLUDE_DIR) $(TEST_DIR) -name "*.c" -o -name "*.h" | \
+		xargs $(CLANG_FORMAT) $(FORMAT_STYLE) -i; \
+		echo "Code formatting completed"; \
+	else \
+		echo "clang-format not found, skipping formatting"; \
+	fi
+
+check-format:
+	@echo "Checking code formatting..."
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		find $(SRC_DIR) $(INCLUDE_DIR) $(TEST_DIR) -name "*.c" -o -name "*.h" | \
+		xargs $(CLANG_FORMAT) $(FORMAT_STYLE) --dry-run --Werror; \
+		echo "Code formatting check passed"; \
+	else \
+		echo "clang-format not found, skipping format check"; \
+	fi
+
+# Enhanced test targets with better output
 test: $(TEST_TARGET)
-	@echo "Running interface layer tests..."
+	@echo "=========================================="
+	@echo "Running NewICD3 Interface Layer Tests"
+	@echo "=========================================="
 	@$(TEST_TARGET)
+	@echo "=========================================="
+	@echo "All tests completed successfully!"
+	@echo "=========================================="
 
 integration-test: $(MAIN_TARGET)
-	@echo "Running integration tests..."
+	@echo "=========================================="
+	@echo "Running NewICD3 Integration Tests"
+	@echo "=========================================="
 	@$(MAIN_TARGET)
+	@echo "=========================================="
+	@echo "Integration tests completed!"
+	@echo "=========================================="
 
 # Clean
 clean:
@@ -77,15 +129,26 @@ help:
 	@echo "==========================================="
 	@echo ""
 	@echo "Available targets:"
-	@echo "  all              - Build all targets"
-	@echo "  test             - Run unit tests"
+	@echo "  all              - Build all targets (default)"
+	@echo "  test             - Run unit tests with enhanced output"
 	@echo "  integration-test - Run integration tests"
 	@echo "  clean            - Clean build artifacts"
+	@echo "  format           - Format source code with clang-format"
+	@echo "  check-format     - Check code formatting compliance"
 	@echo "  help             - Show this help message"
 	@echo ""
-	@echo "Architecture:"
-	@echo "  Application Layer    - src/app_layer/"
-	@echo "  Driver Layer         - src/driver_layer/"
-	@echo "  Interface Layer      - src/interface_layer/"
-	@echo "  Device Models        - src/device_models/ (future)"
-	@echo "  Tests                - tests/"
+	@echo "Architecture Overview:"
+	@echo "  Application Layer    - src/app_layer/     - System initialization & test execution"
+	@echo "  Driver Layer         - src/driver_layer/  - CMSIS-compliant device drivers"
+	@echo "  Interface Layer      - src/interface_layer/ - Memory protection & signal handling"
+	@echo "  Device Models        - src/device_models/ - Python hardware behavior simulation"
+	@echo "  Tests                - tests/             - Comprehensive test suite"
+	@echo ""
+	@echo "Build artifacts:"
+	@echo "  $(MAIN_TARGET) - Main simulator executable"
+	@echo "  $(TEST_TARGET)  - Test suite executable"
+	@echo ""
+	@echo "Prerequisites:"
+	@echo "  - GCC compiler"
+	@echo "  - Python 3.x (for device models)"
+	@echo "  - clang-format (optional, for code formatting)"

@@ -1,9 +1,35 @@
 #!/usr/bin/env python3
 """
-Model Interface for NewICD3 Interface Layer
+NewICD3 Device Model Interface
 
-This Python interface provides device model functionality and can trigger
-interrupts to the C driver interface via socket protocol.
+This module provides the Python-based device model interface for the NewICD3
+universal IC simulator. It implements the server side of the socket-based
+communication protocol with the C interface layer.
+
+Key Features:
+- Unix domain socket server for communication with C driver interface
+- Register read/write simulation with configurable behavior
+- Interrupt generation and delivery to C drivers  
+- Protocol-compliant message handling
+- Multi-client support for concurrent device simulation
+
+Architecture:
+    C Driver Layer ←→ C Interface Layer ←→ Python Device Models
+    
+Communication Protocol:
+    - Commands: READ, WRITE, INTERRUPT, INIT, DEINIT
+    - Results: SUCCESS, ERROR, TIMEOUT, INVALID_ADDR
+    - Message structure: device_id, command, address, length, result, data
+
+Usage:
+    model = ModelInterface(device_id=1)
+    model.start()  # Starts socket server
+    model.trigger_interrupt_to_driver(irq_id)  # Send interrupt
+    model.stop()   # Cleanup
+
+@author NewICD3 Team
+@version 1.0
+@date 2024
 """
 
 import socket
