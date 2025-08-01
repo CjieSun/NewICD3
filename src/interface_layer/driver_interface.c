@@ -513,10 +513,6 @@ int send_message_to_model(const protocol_message_t *message, protocol_message_t 
     model_addr.sun_family = AF_UNIX;
     strncpy(model_addr.sun_path, SOCKET_PATH, sizeof(model_addr.sun_path) - 1);
     
-    printf("Attempting to connect to socket: %s\n", SOCKET_PATH);
-    printf("Socket path length: %zu\n", strlen(SOCKET_PATH));
-    fflush(stdout);
-    
     /* Attempt to connect to model - Unix sockets usually connect immediately */
     int connect_result = connect(model_socket, (struct sockaddr*)&model_addr, sizeof(model_addr));
     if (connect_result == -1) {
@@ -527,14 +523,9 @@ int send_message_to_model(const protocol_message_t *message, protocol_message_t 
     }
     
     printf("Connected to model successfully\n");
-    fflush(stdout);  // Force output
     
     /* Send message to model */
-    printf("About to send message of size %zu bytes...\n", sizeof(protocol_message_t));
-    fflush(stdout);
     ssize_t bytes_sent = send(model_socket, message, sizeof(protocol_message_t), 0);
-    printf("send() returned: %zd\n", bytes_sent);
-    fflush(stdout);
     if (bytes_sent != sizeof(protocol_message_t)) {
         printf("Failed to send complete message to model (%zd/%zu bytes), using simulation\n", 
                bytes_sent, sizeof(protocol_message_t));

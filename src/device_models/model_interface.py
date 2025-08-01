@@ -61,7 +61,7 @@ class ModelInterface:
             try:
                 print("Waiting for client connection...")
                 client, addr = self.socket.accept()
-                print(f"Client connected: {client}")
+                print(f"Client connected")
                 self.client_sockets.append(client)
                 # Handle client in separate thread
                 threading.Thread(target=self.handle_client, args=(client,)).start()
@@ -131,23 +131,17 @@ class ModelInterface:
         try:
             # Receive full protocol message (5 uint32_t + 256 bytes data = 276 bytes total)
             expected_size = 5 * 4 + 256  # 5 uint32_t fields + 256 byte data array
-            print(f"Waiting to receive {expected_size} bytes from new client...")
             
             data = client_socket.recv(expected_size)
             if not data:
-                print("No data received, client disconnected")
                 return
-            
-            print(f"Received {len(data)} bytes of data")
             
             if len(data) < expected_size:
                 # Try to receive remaining data
                 remaining = expected_size - len(data)
-                print(f"Need {remaining} more bytes...")
                 more_data = client_socket.recv(remaining)
                 if more_data:
                     data += more_data
-                    print(f"Received additional {len(more_data)} bytes, total: {len(data)}")
                 
             # Parse message according to C protocol_message_t structure
             if len(data) >= expected_size:
@@ -155,20 +149,15 @@ class ModelInterface:
                 device_id, command, address, length, result = struct.unpack('<IIIII', data[:20])
                 message_data = data[20:20+256]  # Extract the 256-byte data array
                 
-                print(f"Parsed: device_id={device_id}, cmd={command}, addr=0x{address:x}, len={length}, result={result}")
+                print(f"Received: device_id={device_id}, cmd={command}, addr=0x{address:x}, len={length}")
                 
                 response = self.process_command(device_id, command, address, length, message_data)
-                print(f"Sending response of {len(response)} bytes...")
-                bytes_sent = client_socket.send(response)
-                print(f"Response sent: {bytes_sent} bytes")
-            else:
-                print(f"Insufficient data received: {len(data)} < {expected_size}")
+                client_socket.send(response)
                 
         except Exception as e:
             print(f"Error handling client: {e}")
         finally:
             # Always close the client connection after handling one message
-            print("Closing client connection")
             if client_socket in self.client_sockets:
                 self.client_sockets.remove(client_socket)
             client_socket.close()
