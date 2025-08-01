@@ -39,6 +39,7 @@ import time
 import os
 import sys
 import logging
+import signal
 
 # Setup logging for Python model interface
 def setup_logging():
@@ -80,6 +81,7 @@ RESULT_TIMEOUT = 0x02
 RESULT_INVALID_ADDR = 0x03
 
 SOCKET_PATH = "/tmp/icd3_interface"
+DRIVER_PID_FILE = "/tmp/icd3_driver_pid"
 
 class ModelInterface:
     def __init__(self, device_id=1):
@@ -88,6 +90,7 @@ class ModelInterface:
         self.running = False
         self.socket = None
         self.client_sockets = []  # Track connected clients for interrupt delivery
+        self.driver_pid = None  # PID of the C driver process for signal-based interrupts
         
     def start(self):
         """Start the device model server"""
@@ -142,28 +145,82 @@ class ModelInterface:
         except OSError:
             pass
             
+    def get_driver_pid(self):
+        """Get the PID of the C driver process for signal-based interrupts"""
+        try:
+            if os.path.exists(DRIVER_PID_FILE):
+                with open(DRIVER_PID_FILE, 'r') as f:
+                    pid = int(f.read().strip())
+                    self.driver_pid = pid
+                    logger.debug(f"Found driver PID: {pid}")
+                    return pid
+        except (ValueError, IOError) as e:
+            logger.warning(f"Failed to read driver PID file: {e}")
+        
+        # Fallback: try to find the process by name (less reliable)
+        try:
+            import subprocess
+            result = subprocess.run(['pgrep', '-f', 'icd3_simulator'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                pid = int(result.stdout.strip().split()[0])
+                self.driver_pid = pid
+                logger.debug(f"Found driver PID via pgrep: {pid}")
+                return pid
+        except Exception as e:
+            logger.warning(f"Failed to find driver process: {e}")
+        
+        return None
+            
     def trigger_interrupt_to_driver(self, interrupt_id):
-        """Trigger an interrupt to the driver interface"""
+        """Trigger an interrupt to the driver interface using signals"""
         logger.info(f"Model triggering interrupt {interrupt_id} to driver for device {self.device_id}")
         
-        # Create interrupt message - device_id, command, address, length, result + data[256]
-        message = struct.pack('<IIIII', self.device_id, CMD_INTERRUPT, 0, interrupt_id, RESULT_SUCCESS)
-        message += b'\x00' * 256  # Padding for data field
+        # Get the driver process PID
+        driver_pid = self.get_driver_pid()
+        if not driver_pid:
+            logger.error("Cannot send interrupt: driver PID not found")
+            return
         
-        # Send interrupt to all connected clients (driver interfaces)
-        for client in self.client_sockets[:]:  # Use slice to avoid modification during iteration
+        try:
+            # Pack device_id (lower 16 bits) and interrupt_id (upper 16 bits) into signal value
+            signal_data = (interrupt_id << 16) | (self.device_id & 0xFFFF)
+            
+            # Send SIGUSR1 with data using sigqueue (if available) or kill
             try:
-                client.send(message)
-                logger.debug(f"Interrupt {interrupt_id} sent to driver")
+                # Try to use os.kill with signal data (Python 3.3+ on some systems)
+                # Since Python doesn't directly support sigqueue, we'll use a simpler approach
+                # We'll send SIGUSR1 and write interrupt details to a temporary file
+                
+                # Create a temporary file with interrupt details
+                import tempfile
+                interrupt_file = f"/tmp/icd3_interrupt_{driver_pid}"
+                with open(interrupt_file, 'w') as f:
+                    f.write(f"{self.device_id},{interrupt_id}")
+                
+                # Send SIGUSR1 signal
+                os.kill(driver_pid, signal.SIGUSR1)
+                logger.debug(f"Sent SIGUSR1 to PID {driver_pid} for device {self.device_id}, interrupt {interrupt_id}")
+                
+                # Clean up the temporary file after a short delay
+                def cleanup_file():
+                    time.sleep(0.5)  # Give the C process time to read it
+                    try:
+                        os.unlink(interrupt_file)
+                    except:
+                        pass
+                
+                threading.Thread(target=cleanup_file, daemon=True).start()
+                
+            except PermissionError:
+                logger.error(f"Permission denied when sending signal to PID {driver_pid}")
+            except ProcessLookupError:
+                logger.error(f"Process {driver_pid} not found")
             except Exception as e:
-                logger.error(f"Failed to send interrupt to client: {e}")
-                # Remove failed client
-                if client in self.client_sockets:
-                    self.client_sockets.remove(client)
-                try:
-                    client.close()
-                except:
-                    pass
+                logger.error(f"Failed to send signal: {e}")
+                
+        except Exception as e:
+            logger.error(f"Failed to trigger interrupt via signal: {e}")
                     
     def simulate_device_activity(self):
         """Simulate device activity that triggers interrupts"""

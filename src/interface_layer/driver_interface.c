@@ -17,12 +17,18 @@
 #define MAX_DEVICES 16
 #define SOCKET_PATH "/tmp/icd3_interface"
 #define DRIVER_SOCKET_PATH "/tmp/icd3_driver_interface"
+#define DRIVER_PID_FILE "/tmp/icd3_driver_pid"
 
 /* Global state */
 static device_info_t devices[MAX_DEVICES];
 static int device_count = 0;
 static int server_socket = -1;
 static interrupt_handler_t interrupt_handlers[MAX_DEVICES];
+
+/* Signal-based interrupt handling */
+static volatile uint32_t pending_device_interrupt = 0;
+static volatile uint32_t pending_interrupt_id = 0;
+static volatile sig_atomic_t interrupt_pending = 0;
 
 /* Function to calculate x86-64 instruction length */
 static int get_instruction_length(uint8_t *instruction) {
@@ -174,7 +180,31 @@ static int get_destination_register_from_modrm(uint8_t *instruction, int is_two_
     }
 }
 
-/* Signal handler for memory access violations */
+/* Signal handler for interrupt delivery from models */
+static void interrupt_signal_handler(int sig, siginfo_t *info, void *context) {
+    (void)sig;      /* Mark parameter as used */
+    (void)context;  /* Mark parameter as used */
+    (void)info;     /* Mark parameter as used */
+    
+    /* Read interrupt details from temporary file */
+    char interrupt_file[256];
+    snprintf(interrupt_file, sizeof(interrupt_file), "/tmp/icd3_interrupt_%d", getpid());
+    
+    FILE *f = fopen(interrupt_file, "r");
+    if (f) {
+        uint32_t device_id, interrupt_id;
+        if (fscanf(f, "%u,%u", &device_id, &interrupt_id) == 2) {
+            pending_device_interrupt = device_id;
+            pending_interrupt_id = interrupt_id;
+            interrupt_pending = 1;
+            
+            printf("Signal interrupt received: device_id=%d, interrupt_id=0x%x\n", 
+                   device_id, interrupt_id);
+        }
+        fclose(f);
+        /* File will be cleaned up by Python model */
+    }
+}
 static void segv_handler(int sig, siginfo_t *info, void *context) {
     (void)sig; /* Mark parameter as used */
     uintptr_t fault_addr = (uintptr_t)info->si_addr;
@@ -609,14 +639,40 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
 
 int interface_layer_init(void) {
     /* Install signal handler for SIGSEGV */
-    struct sigaction sa;
-    sa.sa_sigaction = segv_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO;
+    struct sigaction sa_segv;
+    sa_segv.sa_sigaction = segv_handler;
+    sigemptyset(&sa_segv.sa_mask);
+    sa_segv.sa_flags = SA_SIGINFO;
     
-    if (sigaction(SIGSEGV, &sa, NULL) == -1) {
+    if (sigaction(SIGSEGV, &sa_segv, NULL) == -1) {
         perror("Failed to install SIGSEGV handler");
         return -1;
+    }
+    
+    /* Install signal handler for SIGUSR1 (interrupt delivery) */
+    struct sigaction sa_usr1;
+    sa_usr1.sa_sigaction = interrupt_signal_handler;
+    sigemptyset(&sa_usr1.sa_mask);
+    sa_usr1.sa_flags = SA_SIGINFO;
+    
+    if (sigaction(SIGUSR1, &sa_usr1, NULL) == -1) {
+        perror("Failed to install SIGUSR1 handler for interrupts");
+        return -1;
+    }
+    
+    /* Initialize signal-based interrupt state */
+    pending_device_interrupt = 0;
+    pending_interrupt_id = 0;
+    interrupt_pending = 0;
+    
+    /* Write PID to file for Python models to use */
+    FILE *pid_file = fopen(DRIVER_PID_FILE, "w");
+    if (pid_file) {
+        fprintf(pid_file, "%d", getpid());
+        fclose(pid_file);
+        printf("Driver PID %d written to %s\n", getpid(), DRIVER_PID_FILE);
+    } else {
+        printf("Warning: Failed to write PID file\n");
     }
     
     /* Initialize socket for communication with device models */
@@ -646,7 +702,7 @@ int interface_layer_init(void) {
         return -1;
     }
     
-    printf("Driver interface initialized successfully\n");
+    printf("Driver interface initialized successfully with signal-based interrupts\n");
     return 0;
 }
 
@@ -666,6 +722,9 @@ int interface_layer_deinit(void) {
         unlink(DRIVER_SOCKET_PATH);
     }
     
+    /* Clean up PID file */
+    unlink(DRIVER_PID_FILE);
+
     device_count = 0;
     printf("Driver interface deinitialized\n");
     return 0;
@@ -856,48 +915,33 @@ simulation_fallback:
     return 0;
 }
 
-/* Function to receive and handle interrupts from Python model */
+/* Function to process pending signal-based interrupts */
 int handle_model_interrupts(void) {
-    /* This would typically be called in a separate thread to listen for 
-     * incoming interrupts from the Python model via socket */
-    
-    fd_set readfds;
-    struct timeval timeout;
-    
-    FD_ZERO(&readfds);
-    FD_SET(server_socket, &readfds);
-    
-    /* Non-blocking check for incoming connections */
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 100000;  /* 100ms timeout */
-    
-    int activity = select(server_socket + 1, &readfds, NULL, NULL, &timeout);
-    
-    if (activity > 0 && FD_ISSET(server_socket, &readfds)) {
-        /* Accept incoming connection from model */
-        int client_socket = accept(server_socket, NULL, NULL);
-        if (client_socket >= 0) {
-            printf("Model connected for interrupt delivery\n");
-            
-            /* Read interrupt message */
-            protocol_message_t interrupt_msg;
-            ssize_t bytes_read = recv(client_socket, &interrupt_msg, sizeof(interrupt_msg), 0);
-            
-            if (bytes_read == sizeof(interrupt_msg) && interrupt_msg.command == CMD_INTERRUPT) {
-                printf("Received interrupt from model: device_id=%d, interrupt_id=%d\n",
-                       interrupt_msg.device_id, interrupt_msg.length);
-                
-                /* Trigger the interrupt handler */
-                if (trigger_interrupt(interrupt_msg.device_id, interrupt_msg.length) == 0) {
-                    printf("Interrupt from model processed successfully\n");
-                } else {
-                    printf("Failed to process interrupt from model\n");
-                }
-            }
-            
-            close(client_socket);
+    /* Check if there's a pending interrupt from signal handler */
+    if (interrupt_pending) {
+        uint32_t device_id = pending_device_interrupt;
+        uint32_t interrupt_id = pending_interrupt_id;
+        
+        printf("Processing signal-based interrupt: device_id=%d, interrupt_id=0x%x\n",
+               device_id, interrupt_id);
+        
+        /* Clear the pending interrupt flag */
+        interrupt_pending = 0;
+        
+        /* Trigger the interrupt handler */
+        if (trigger_interrupt(device_id, interrupt_id) == 0) {
+            printf("Signal-based interrupt processed successfully\n");
+            return 1; /* Interrupt was processed */
+        } else {
+            printf("Failed to process signal-based interrupt\n");
+            return -1;
         }
     }
     
-    return 0;
+    return 0; /* No interrupt pending */
+}
+
+/* Function to get the current process PID for signal-based interrupts */
+pid_t get_interface_process_pid(void) {
+    return getpid();
 }
