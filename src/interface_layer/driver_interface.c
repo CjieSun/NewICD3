@@ -16,6 +16,7 @@
 
 #define MAX_DEVICES 16
 #define SOCKET_PATH "/tmp/icd3_interface"
+#define DRIVER_SOCKET_PATH "/tmp/icd3_driver_interface"
 
 /* Global state */
 static device_info_t devices[MAX_DEVICES];
@@ -342,10 +343,10 @@ int interface_layer_init(void) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, DRIVER_SOCKET_PATH, sizeof(addr.sun_path) - 1);
     
     /* Remove existing socket file */
-    unlink(SOCKET_PATH);
+    unlink(DRIVER_SOCKET_PATH);
     
     if (bind(server_socket, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         perror("Failed to bind socket");
@@ -376,7 +377,7 @@ int interface_layer_deinit(void) {
     
     if (server_socket != -1) {
         close(server_socket);
-        unlink(SOCKET_PATH);
+        unlink(DRIVER_SOCKET_PATH);
     }
     
     device_count = 0;
@@ -507,95 +508,46 @@ int send_message_to_model(const protocol_message_t *message, protocol_message_t 
         return -1;
     }
     
-    /* Set socket to non-blocking mode */
-    int flags = fcntl(model_socket, F_GETFL, 0);
-    fcntl(model_socket, F_SETFL, flags | O_NONBLOCK);
-    
     struct sockaddr_un model_addr;
     memset(&model_addr, 0, sizeof(model_addr));
     model_addr.sun_family = AF_UNIX;
     strncpy(model_addr.sun_path, SOCKET_PATH, sizeof(model_addr.sun_path) - 1);
     
-    /* Attempt to connect to model with timeout */
+    /* Attempt to connect to model - Unix sockets usually connect immediately */
     int connect_result = connect(model_socket, (struct sockaddr*)&model_addr, sizeof(model_addr));
-    if (connect_result == -1 && errno != EINPROGRESS) {
+    if (connect_result == -1) {
         /* Model not available, fall back to simulation */
-        printf("Model not available, using simulation\n");
+        printf("Model not available (connect failed: %s), using simulation\n", strerror(errno));
         close(model_socket);
         goto simulation_fallback;
     }
     
-    /* Wait for connection to complete with timeout */
-    fd_set write_fds;
-    struct timeval timeout;
-    FD_ZERO(&write_fds);
-    FD_SET(model_socket, &write_fds);
-    timeout.tv_sec = 0;  /* 500ms timeout */
-    timeout.tv_usec = 500000;
+    printf("Connected to model successfully\n");
     
-    int select_result = select(model_socket + 1, NULL, &write_fds, NULL, &timeout);
-    if (select_result <= 0) {
-        /* Connection timed out or failed, fall back to simulation */
-        printf("Model connection timeout, using simulation\n");
-        close(model_socket);
-        goto simulation_fallback;
-    }
-    
-    /* Check if connection actually succeeded */
-    int error = 0;
-    socklen_t len = sizeof(error);
-    if (getsockopt(model_socket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
-        printf("Model connection failed, using simulation\n");
-        close(model_socket);
-        goto simulation_fallback;
-    }
-    
-    /* Set back to blocking mode for data transfer */
-    fcntl(model_socket, F_SETFL, flags);
-    
-    /* Send message to model with timeout */
-    fd_set write_fds2;
-    struct timeval send_timeout;
-    FD_ZERO(&write_fds2);
-    FD_SET(model_socket, &write_fds2);
-    send_timeout.tv_sec = 0;
-    send_timeout.tv_usec = 500000;  /* 500ms timeout */
-    
-    if (select(model_socket + 1, NULL, &write_fds2, NULL, &send_timeout) <= 0) {
-        printf("Model send timeout, using simulation\n");
-        close(model_socket);
-        goto simulation_fallback;
-    }
-    
-    ssize_t bytes_sent = send(model_socket, message, sizeof(protocol_message_t), MSG_DONTWAIT);
+    /* Send message to model */
+    ssize_t bytes_sent = send(model_socket, message, sizeof(protocol_message_t), 0);
     if (bytes_sent != sizeof(protocol_message_t)) {
-        printf("Failed to send complete message to model, using simulation\n");
+        printf("Failed to send complete message to model (%zd/%zu bytes), using simulation\n", 
+               bytes_sent, sizeof(protocol_message_t));
+        if (bytes_sent == -1) {
+            printf("send() error: %s\n", strerror(errno));
+        }
         close(model_socket);
         goto simulation_fallback;
     }
     
-    /* Receive response from model with timeout */
+    printf("Message sent to model (%zd bytes)\n", bytes_sent);
+    
+    /* Receive response from model */
     if (response) {
-        fd_set read_fds;
-        struct timeval recv_timeout;
-        FD_ZERO(&read_fds);
-        FD_SET(model_socket, &read_fds);
-        recv_timeout.tv_sec = 0;
-        recv_timeout.tv_usec = 500000;  /* 500ms timeout */
-        
-        if (select(model_socket + 1, &read_fds, NULL, NULL, &recv_timeout) <= 0) {
-            printf("Model receive timeout, using simulation\n");
-            close(model_socket);
-            goto simulation_fallback;
-        }
-        
-        ssize_t bytes_received = recv(model_socket, response, sizeof(protocol_message_t), MSG_DONTWAIT);
+        ssize_t bytes_received = recv(model_socket, response, sizeof(protocol_message_t), 0);
         if (bytes_received != sizeof(protocol_message_t)) {
-            printf("Failed to receive complete response from model, using simulation\n");
+            printf("Failed to receive complete response from model (%zd/%zu bytes), using simulation\n", 
+                   bytes_received, sizeof(protocol_message_t));
             close(model_socket);
             goto simulation_fallback;
         }
-        printf("Received response from model: result=%d\n", response->result);
+        printf("Received response from model: result=%d (%zd bytes)\n", response->result, bytes_received);
     }
     
     close(model_socket);
