@@ -42,23 +42,32 @@ class ModelInterface:
         # Remove existing socket
         try:
             os.unlink(SOCKET_PATH)
+            print(f"Removed existing socket: {SOCKET_PATH}")
         except OSError:
-            pass
+            print(f"No existing socket to remove: {SOCKET_PATH}")
             
         # Create and bind socket
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.bind(SOCKET_PATH)
-        self.socket.listen(5)
-        
-        print(f"Device model {self.device_id} started on {SOCKET_PATH}")
+        try:
+            self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.socket.bind(SOCKET_PATH)
+            self.socket.listen(5)
+            print(f"Device model {self.device_id} started on {SOCKET_PATH}")
+            print(f"Socket file exists: {os.path.exists(SOCKET_PATH)}")
+        except Exception as e:
+            print(f"Failed to create socket: {e}")
+            return
         
         while self.running:
             try:
+                print("Waiting for client connection...")
                 client, addr = self.socket.accept()
+                print(f"Client connected: {client}")
                 self.client_sockets.append(client)
                 # Handle client in separate thread
                 threading.Thread(target=self.handle_client, args=(client,)).start()
-            except OSError:
+            except OSError as e:
+                if self.running:  # Only print error if we're still supposed to be running
+                    print(f"Socket error: {e}")
                 break
     def stop(self):
         """Stop the device model server"""
@@ -83,7 +92,7 @@ class ModelInterface:
         """Trigger an interrupt to the driver interface"""
         print(f"Model triggering interrupt {interrupt_id} to driver for device {self.device_id}")
         
-        # Create interrupt message
+        # Create interrupt message - device_id, command, address, length, result + data[256]
         message = struct.pack('<IIIII', self.device_id, CMD_INTERRUPT, 0, interrupt_id, RESULT_SUCCESS)
         message += b'\x00' * 256  # Padding for data field
         
@@ -118,27 +127,48 @@ class ModelInterface:
             self.trigger_interrupt_to_driver(0x02)  # Status change interrupt
             
     def handle_client(self, client_socket):
-        """Handle communication with a client"""
+        """Handle communication with a client - one message per connection"""
         try:
-            while self.running:
-                # Receive message (simplified protocol)
-                data = client_socket.recv(1024)
-                if not data:
-                    break
-                    
-                # Parse message (this is a simplified version)
-                if len(data) >= 20:  # Minimum message size
-                    device_id, command, address, length = struct.unpack('<IIII', data[:16])
-                    
-                    print(f"Received: device_id={device_id}, cmd={command}, addr=0x{address:x}, len={length}")
-                    
-                    response = self.process_command(device_id, command, address, length, data[20:])
-                    client_socket.send(response)
-                    
+            # Receive full protocol message (5 uint32_t + 256 bytes data = 276 bytes total)
+            expected_size = 5 * 4 + 256  # 5 uint32_t fields + 256 byte data array
+            print(f"Waiting to receive {expected_size} bytes from new client...")
+            
+            data = client_socket.recv(expected_size)
+            if not data:
+                print("No data received, client disconnected")
+                return
+            
+            print(f"Received {len(data)} bytes of data")
+            
+            if len(data) < expected_size:
+                # Try to receive remaining data
+                remaining = expected_size - len(data)
+                print(f"Need {remaining} more bytes...")
+                more_data = client_socket.recv(remaining)
+                if more_data:
+                    data += more_data
+                    print(f"Received additional {len(more_data)} bytes, total: {len(data)}")
+                
+            # Parse message according to C protocol_message_t structure
+            if len(data) >= expected_size:
+                # Unpack: device_id, command, address, length, result
+                device_id, command, address, length, result = struct.unpack('<IIIII', data[:20])
+                message_data = data[20:20+256]  # Extract the 256-byte data array
+                
+                print(f"Parsed: device_id={device_id}, cmd={command}, addr=0x{address:x}, len={length}, result={result}")
+                
+                response = self.process_command(device_id, command, address, length, message_data)
+                print(f"Sending response of {len(response)} bytes...")
+                bytes_sent = client_socket.send(response)
+                print(f"Response sent: {bytes_sent} bytes")
+            else:
+                print(f"Insufficient data received: {len(data)} < {expected_size}")
+                
         except Exception as e:
             print(f"Error handling client: {e}")
         finally:
-            # Remove client from tracking list
+            # Always close the client connection after handling one message
+            print("Closing client connection")
             if client_socket in self.client_sockets:
                 self.client_sockets.remove(client_socket)
             client_socket.close()
@@ -173,7 +203,8 @@ class ModelInterface:
             result = RESULT_ERROR
             print(f"Unknown command: {command}")
             
-        # Build response message
+        # Build response message with correct protocol_message_t structure
+        # device_id, command, address, length, result + data[256]
         response = struct.pack('<IIIII', device_id, command, address, length, result)
         response += response_data
         
