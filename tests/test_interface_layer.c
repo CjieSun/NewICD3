@@ -774,6 +774,145 @@ TEST(bare_metal_mixed_access) {
     return 0;
 }
 
+TEST(memset_rep_stosb_simulation) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Register a test device */
+    if (register_device(10, 0xC0000000, 0x1000) != 0) {
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    printf("  Testing simulated REP STOSB (memset 8-bit pattern)...\n");
+    
+    /* Simulate REP STOSB instruction manually using inline assembly
+     * This tests the actual REP STOS* handling in segv_handler */
+    uint8_t *dest = (uint8_t *)0xC0000000;
+    size_t count = 16;
+    uint8_t pattern = 0xAA;
+    
+    printf("  Simulating REP STOSB: dest=0x%lx, pattern=0x%02x, count=%zu\n", 
+           (uintptr_t)dest, pattern, count);
+    
+    /* Use inline assembly to generate actual REP STOSB instruction
+     * This will trigger our segv_handler REP STOS* processing */
+    __asm__ volatile (
+        "movq %0, %%rdi\n\t"     /* Destination address */
+        "movq %1, %%rcx\n\t"     /* Count */
+        "movb %2, %%al\n\t"      /* Pattern to store */
+        "rep stosb\n\t"          /* REP STOSB instruction */
+        :
+        : "r"(dest), "r"(count), "r"(pattern)
+        : "rdi", "rcx", "rax", "memory"
+    );
+    
+    printf("  REP STOSB completed via inline assembly\n");
+    
+    /* Verify the result by reading back some values */
+    printf("  Verifying REP STOSB results...\n");
+    for (size_t i = 0; i < count; i += 4) {  /* Check every 4th byte */
+        uint8_t read_val = dest[i]; /* This will trigger individual read SEGVs */
+        printf("  dest[%zu] = 0x%02x (expected: 0x%02x)\n", i, read_val, pattern);
+    }
+    
+    unregister_device(10);
+    interface_layer_deinit();
+    return 0;
+}
+
+TEST(memset_rep_stosd_simulation) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Register a test device */
+    if (register_device(11, 0xD0000000, 0x1000) != 0) {
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    printf("  Testing simulated REP STOSD (memset 32-bit pattern)...\n");
+    
+    /* Simulate REP STOSD instruction manually using inline assembly */
+    uint32_t *dest = (uint32_t *)0xD0000000;
+    size_t count = 8;  /* 8 dwords = 32 bytes */
+    uint32_t pattern = 0x55555555;  /* Will store this as 4-byte pattern */
+    
+    printf("  Simulating REP STOSD: dest=0x%lx, pattern=0x%08x, count=%zu\n", 
+           (uintptr_t)dest, pattern, count);
+    
+    /* Use inline assembly to generate actual REP STOSD instruction */
+    __asm__ volatile (
+        "movq %0, %%rdi\n\t"     /* Destination address */
+        "movq %1, %%rcx\n\t"     /* Count */
+        "movl %2, %%eax\n\t"     /* Pattern to store (32-bit) */
+        "rep stosl\n\t"          /* REP STOSD instruction */
+        :
+        : "r"(dest), "r"(count), "r"(pattern)
+        : "rdi", "rcx", "rax", "memory"
+    );
+    
+    printf("  REP STOSD completed via inline assembly\n");
+    
+    /* Verify the result by reading back some values */
+    printf("  Verifying REP STOSD results...\n");
+    for (size_t i = 0; i < count; i += 2) {  /* Check every other dword */
+        uint32_t read_val = dest[i]; /* This will trigger individual read SEGVs */
+        printf("  dest[%zu] = 0x%08x (expected: 0x%08x)\n", i, read_val, pattern);
+    }
+    
+    unregister_device(11);
+    interface_layer_deinit();
+    return 0;
+}
+
+TEST(memset_rep_zero_fill_simulation) {
+    if (interface_layer_init() != 0) {
+        return -1;
+    }
+    
+    /* Register a test device */
+    if (register_device(12, 0xE0000000, 0x1000) != 0) {
+        interface_layer_deinit();
+        return -1;
+    }
+    
+    printf("  Testing simulated REP STOSB zero-fill...\n");
+    
+    /* Simulate memset(ptr, 0, size) using REP STOSB */
+    uint8_t *dest = (uint8_t *)0xE0000000;
+    size_t count = 32;
+    uint8_t pattern = 0x00;  /* Zero fill */
+    
+    printf("  Simulating zero-fill REP STOSB: dest=0x%lx, count=%zu\n", 
+           (uintptr_t)dest, count);
+    
+    __asm__ volatile (
+        "movq %0, %%rdi\n\t"     /* Destination address */
+        "movq %1, %%rcx\n\t"     /* Count */
+        "movb %2, %%al\n\t"      /* Zero pattern */
+        "rep stosb\n\t"          /* REP STOSB instruction */
+        :
+        : "r"(dest), "r"(count), "r"(pattern)
+        : "rdi", "rcx", "rax", "memory"
+    );
+    
+    printf("  REP STOSB zero-fill completed\n");
+    
+    /* Verify zero-fill by checking several locations */
+    printf("  Verifying zero-fill results...\n");
+    for (size_t i = 0; i < count; i += 8) {  /* Check every 8th byte */
+        uint8_t read_val = dest[i];
+        printf("  dest[%zu] = 0x%02x (expected: 0x00)\n", i, read_val);
+    }
+    
+    unregister_device(12);
+    interface_layer_deinit();
+    return 0;
+}
+
 TEST(uart_device_test) {
     if (interface_layer_init() != 0) {
         return -1;
@@ -865,6 +1004,9 @@ int main(void) {
     RUN_TEST(bare_metal_16bit_access);
     RUN_TEST(bare_metal_32bit_access);
     RUN_TEST(bare_metal_mixed_access);
+    RUN_TEST(memset_rep_stosb_simulation);
+    RUN_TEST(memset_rep_stosd_simulation);
+    RUN_TEST(memset_rep_zero_fill_simulation);
     RUN_TEST(uart_device_test);
     RUN_TEST(interrupt_handling);
     RUN_TEST(model_interrupt_handling);

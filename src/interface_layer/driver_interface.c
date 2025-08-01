@@ -72,6 +72,10 @@ static int get_instruction_length(uint8_t *instruction) {
         opcode == 0xC6 || opcode == 0xC7) {
         has_modrm = 1;
     }
+    /* String operations (STOS) don't use ModR/M but have implicit operands */
+    else if (opcode == 0xAA || opcode == 0xAB) {
+        has_modrm = 0;  /* STOSB/STOSW/STOSD use implicit [RDI] addressing */
+    }
     /* Two-byte opcodes that have ModR/M (0x0F prefix already consumed) */
     else if (opcode == 0xB6 || opcode == 0xB7 || opcode == 0xBE || opcode == 0xBF) {
         has_modrm = 1;
@@ -140,10 +144,13 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     int is_write = 0;
     uint32_t access_size = 4; /* Default to 4 bytes */
     uint64_t write_data = 0;
+    int is_rep_operation = 0; /* Track REP prefix for bulk operations like memset */
+    uint64_t rep_count = 0;   /* Count for REP operations */
     
     /* Enhanced x86-64 instruction parsing */
     uint8_t *inst_ptr = instruction;
     int has_66_prefix = 0;  /* Track 16-bit operand size prefix */
+    int has_rep_prefix = 0; /* Track REP/REPE/REPNE prefix */
     int is_two_byte_opcode = 0;  /* Track two-byte opcodes (0x0F prefix) */
     uint8_t first_opcode = 0;
     uint8_t second_opcode = 0;
@@ -153,6 +160,11 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
            *inst_ptr == 0x2E || *inst_ptr == 0x36 || *inst_ptr == 0x3E ||
            *inst_ptr == 0x26 || *inst_ptr == 0x64 || *inst_ptr == 0x65 ||
            *inst_ptr == 0x67) {
+        /* Check for REP/REPE/REPNE prefixes (used by memset) */
+        if (*inst_ptr == 0xF2 || *inst_ptr == 0xF3) {
+            has_rep_prefix = 1;
+            printf("Detected REP prefix: 0x%02X\n", *inst_ptr);
+        }
         inst_ptr++;
     }
     
@@ -208,6 +220,69 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     } else {
         /* Handle single-byte opcodes */
         switch (first_opcode) {
+            case 0xAA: /* STOSB - store AL to [RDI], used by memset for 8-bit */
+                if (has_rep_prefix) {
+                    is_rep_operation = 1;
+                    is_write = 1;
+                    access_size = 1;
+                    write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF; /* AL register */
+                    rep_count = uctx->uc_mcontext.gregs[REG_RCX] & 0xFFFFFFFF; /* ECX/RCX register */
+                    printf("Detected REP STOSB (memset 8-bit) at RIP 0x%lx: value=0x%02lx, count=%lu\n", 
+                           rip, write_data, rep_count);
+                } else {
+                    is_write = 1;
+                    access_size = 1;
+                    write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFF;
+                    printf("Detected STOSB (single 8-bit store) at RIP 0x%lx\n", rip);
+                }
+                break;
+            case 0xAB: /* STOSW/STOSD/STOSQ - store AX/EAX/RAX to [RDI], used by memset for 16/32/64-bit */
+                if (has_rep_prefix) {
+                    is_rep_operation = 1;
+                    is_write = 1;
+                    /* Determine access size based on prefixes and REX */
+                    if (has_66_prefix) {
+                        access_size = 2;
+                        write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFF; /* AX register */
+                        printf("Detected REP STOSW (memset 16-bit) at RIP 0x%lx: value=0x%04lx\n", 
+                               rip, write_data);
+                    } else {
+                        /* Check if this is 64-bit mode (REX.W prefix would indicate STOSQ) */
+                        uint8_t *rex_check = instruction;
+                        int is_64bit = 0;
+                        while (rex_check < inst_ptr) {
+                            if (*rex_check >= 0x48 && *rex_check <= 0x4F && (*rex_check & 0x08)) {
+                                is_64bit = 1; /* REX.W prefix present */
+                                break;
+                            }
+                            rex_check++;
+                        }
+                        if (is_64bit) {
+                            access_size = 8;
+                            write_data = uctx->uc_mcontext.gregs[REG_RAX]; /* RAX register */
+                            printf("Detected REP STOSQ (memset 64-bit) at RIP 0x%lx: value=0x%016lx\n", 
+                                   rip, write_data);
+                        } else {
+                            access_size = 4;
+                            write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF; /* EAX register */
+                            printf("Detected REP STOSD (memset 32-bit) at RIP 0x%lx: value=0x%08lx\n", 
+                                   rip, write_data);
+                        }
+                    }
+                    rep_count = uctx->uc_mcontext.gregs[REG_RCX] & 0xFFFFFFFF; /* ECX/RCX register */
+                    printf("REP count: %lu\n", rep_count);
+                } else {
+                    is_write = 1;
+                    access_size = has_66_prefix ? 2 : 4;
+                    if (has_66_prefix) {
+                        write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFF;
+                        printf("Detected STOSW (single 16-bit store) at RIP 0x%lx\n", rip);
+                    } else {
+                        write_data = uctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
+                        printf("Detected STOSD (single 32-bit store) at RIP 0x%lx\n", rip);
+                    }
+                }
+                break;
             case 0x8A: /* mov r8, [mem] - 8-bit read */
                 is_write = 0;
                 access_size = 1;
@@ -264,6 +339,68 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
                 printf("Unknown instruction 0x%02X at RIP 0x%lx, treating as 32-bit READ\n", first_opcode, rip);
                 break;
         }
+    }
+    
+    /* Handle REP operations (like memset) by performing multiple individual operations */
+    if (is_rep_operation && rep_count > 0) {
+        printf("Processing REP operation: %lu iterations of %d-byte writes\n", rep_count, access_size);
+        
+        /* Get destination address from RDI register */
+        uintptr_t dest_addr = (uintptr_t)uctx->uc_mcontext.gregs[REG_RDI];
+        printf("REP destination address: 0x%lx\n", dest_addr);
+        
+        /* Perform the bulk write operation as individual writes to device model */
+        for (uint64_t i = 0; i < rep_count; i++) {
+            uintptr_t current_addr = dest_addr + (i * access_size);
+            
+            /* Find which device this address belongs to */
+            int device_found = 0;
+            for (int j = 0; j < device_count; j++) {
+                uint32_t device_base = devices[j].base_address;
+                uint32_t device_size = devices[j].size;
+                
+                if (current_addr >= device_base && current_addr < device_base + device_size) {
+                    device_found = 1;
+                    
+                    /* Send write operation to device model */
+                    protocol_message_t message = {0};
+                    message.device_id = devices[j].device_id;
+                    message.command = CMD_WRITE;
+                    message.address = (uint32_t)current_addr;
+                    message.length = access_size;
+                    memcpy(message.data, &write_data, access_size);
+                    
+                    protocol_message_t response = {0};
+                    if (send_message_to_model(&message, &response) != 0) {
+                        printf("Failed to send REP write operation %lu to device model\n", i);
+                        break;
+                    }
+                    break;
+                }
+            }
+            
+            if (!device_found) {
+                printf("REP operation address 0x%lx not in any registered device\n", current_addr);
+                /* For addresses outside device ranges, this would be an actual segfault */
+                printf("Actual segmentation fault during REP operation at address 0x%lx\n", current_addr);
+                exit(1);
+            }
+        }
+        
+        /* Update registers after REP operation */
+        /* RDI = RDI + (count * access_size) */
+        uctx->uc_mcontext.gregs[REG_RDI] += (rep_count * access_size);
+        /* RCX = 0 (count register is decremented to 0) */
+        uctx->uc_mcontext.gregs[REG_RCX] = 0;
+        
+        printf("REP operation completed: wrote %lu x %d bytes, updated RDI to 0x%lx, RCX to 0\n", 
+               rep_count, access_size, (uintptr_t)uctx->uc_mcontext.gregs[REG_RDI]);
+        
+        /* Advance RIP to skip the REP+STOS instruction */
+        printf("Advancing RIP by %d bytes (from 0x%lx to 0x%lx)\n", 
+               inst_length, rip, rip + inst_length);
+        uctx->uc_mcontext.gregs[REG_RIP] += inst_length;
+        return;
     }
     
     /* Find which device this address belongs to by comparing with device base addresses */
