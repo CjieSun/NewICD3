@@ -1,6 +1,47 @@
 # Build artifacts
+# NewICD3 Build Artifacts and Temporary Files
+
+# Build directories
 build/
 bin/
+
+# Object files
+*.o
+*.a
+*.so
+*.dylib
+
+# Executables
+icd3_simulator
+test_interface_layer
+
+# Debug files
+*.dSYM/
+*.pdb
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Socket files (temporary)
+/tmp/icd3_*
+
+# Editor temporary files
+*~
+.*.swp
+.*.swo
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary test files
+test_model_*.py
 
 # Object files
 *.o
